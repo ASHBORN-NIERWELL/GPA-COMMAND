@@ -1,0 +1,10 @@
+{
+  "semester": "Sem 3.1",
+  "default_exam_date": "2025-09-05",
+  "logs_weight": 0.7,
+  "tests_weight": 0.3,
+  "momentum_days": 7,
+  "focus_n": 2,
+  "show_upcoming_exams": true,
+  "show_recent_activity": true
+}
