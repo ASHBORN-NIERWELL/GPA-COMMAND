@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.spec
+
+# Virtual env
+.venv/
+
+# Build / dist files
+build/
+dist/
+out/
+
+# Streamlit cache
+.streamlit/
+
+# Local data files
+data/
+*.csv
+settings.json
+
+# OS files
+.DS_Store
+Thumbs.db
