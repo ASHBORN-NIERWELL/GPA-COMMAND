@@ -38,6 +38,37 @@ import streamlit as st
 # ----------------------
 APP_NAME = "GPACommandCenter"
 
+def sanitize_subjects_for_editor(df: pd.DataFrame, settings: dict) -> pd.DataFrame:
+    out = df.copy()
+
+    # Ensure required columns exist
+    if "exam_date" not in out.columns:
+        out["exam_date"] = settings.get("default_exam_date", "2025-09-05")
+    if "credits" not in out.columns:
+        out["credits"] = 2
+    if "confidence" not in out.columns:
+        out["confidence"] = 5
+
+    # Coerce dtypes for editor
+    for col in ["id", "name", "user_id"]:
+        if col in out.columns:
+            out[col] = out[col].astype("string")
+
+    out["credits"] = pd.to_numeric(out.get("credits"), errors="coerce").fillna(1).astype(int)
+    out["confidence"] = pd.to_numeric(out.get("confidence"), errors="coerce").fillna(5).round().clip(0, 10).astype(int)
+
+    # IMPORTANT: DateColumn needs datetime.date dtype
+    out["exam_date"] = pd.to_datetime(out.get("exam_date"), errors="coerce")\
+                          .dt.date
+
+    # If any remain missing, fill with default exam date as date
+    default_date = pd.to_datetime(settings.get("default_exam_date", "2025-09-05"), errors="coerce")
+    default_date = default_date.date() if pd.notnull(default_date) else date.today()
+    out["exam_date"] = out["exam_date"].apply(lambda d: default_date if pd.isna(d) else d)
+
+    return out
+
+
 def get_storage_dir() -> Path:
     """A persistent user data dir (works in EXE, avoids temp loss)."""
     env_override = os.getenv("GPA_CC_DATA_DIR")
@@ -458,6 +489,164 @@ page = st.sidebar.radio(
     "Navigate",
     ["📊 Dashboard", "📚 Subjects", "📝 Daily Log", "🧪 Self-Tests", "⚙️ Settings/Backup"],
 )
+# ===== Import / Export helpers =====
+def to_date_safe(series: pd.Series) -> pd.Series:
+    # Accepts strings, datetimes, NaN; returns datetime.date or NaT
+    s = pd.to_datetime(series, errors="coerce")               # parse anything ISO-like
+    # if tz-aware, strip timezone without erroring
+    try:
+        s = s.dt.tz_localize(None)                            # ignore if not tz-aware
+    except Exception:
+        pass
+    return s.dt.date
+
+
+def _ensure_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    out = df.copy()
+    for c in cols:
+        if c not in out.columns:
+            out[c] = np.nan
+    return out
+
+def _align_columns(a: pd.DataFrame, b: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Make both frames have the union of columns (order-insensitive)."""
+    cols = sorted(set(a.columns).union(set(b.columns)))
+    return _ensure_columns(a, cols)[cols], _ensure_columns(b, cols)[cols]
+
+def normalize_subjects_df(df: pd.DataFrame, default_exam: str, user_id: str | None) -> pd.DataFrame:
+    out = df.copy()
+
+    # required columns
+    need = ["id", "name", "credits", "confidence", "exam_date", "user_id"]
+    out = _ensure_columns(out, need)
+
+    # ids
+    out["id"] = out["id"].astype("string").fillna("")
+    mask_blank = out["id"].str.strip() == ""
+    out.loc[mask_blank, "id"] = [str(uuid.uuid4()) for _ in range(mask_blank.sum())]
+
+    # strings
+    for col in ["name", "user_id"]:
+        out[col] = out[col].astype("string").fillna("")
+
+    # numeric ranges
+    out["credits"] = pd.to_numeric(out["credits"], errors="coerce").fillna(1).astype(int)
+    out["confidence"] = (
+        pd.to_numeric(out["confidence"], errors="coerce")
+        .fillna(5)
+        .round()
+        .clip(0, 10)
+        .astype(int)
+    )
+
+    # dates
+    def_exam = pd.to_datetime(default_exam, errors="coerce")
+    out["exam_date"] = pd.to_datetime(out["exam_date"], errors="coerce")
+    out["exam_date"] = out["exam_date"].fillna(def_exam).dt.strftime("%Y-%m-%d")
+
+    # user_id override
+    if user_id is not None:
+        out["user_id"] = str(user_id)
+
+    return out[need]
+
+def normalize_logs_df(df: pd.DataFrame, user_id: str | None) -> pd.DataFrame:
+    out = df.copy()
+    need = ["id", "date", "subject_id", "hours", "task", "score", "notes", "user_id"]
+    out = _ensure_columns(out, need)
+
+    out["id"] = out["id"].astype("string").fillna("")
+    mask_blank = out["id"].str.strip() == ""
+    out.loc[mask_blank, "id"] = [str(uuid.uuid4()) for _ in range(mask_blank.sum())]
+
+    out["subject_id"] = out["subject_id"].astype("string").fillna("")
+    out["task"] = out["task"].astype("string").fillna("")
+    out["notes"] = out["notes"].astype("string").fillna("")
+
+    out["hours"] = pd.to_numeric(out["hours"], errors="coerce").fillna(0.0)
+    out["score"] = pd.to_numeric(out["score"], errors="coerce")
+    out.loc[(out["score"] < 0) | (out["score"] > 100), "score"] = np.nan
+
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+
+    if user_id is not None:
+        out["user_id"] = str(user_id)
+
+    return out[need]
+
+def normalize_tests_df(df: pd.DataFrame, user_id: str | None) -> pd.DataFrame:
+    out = df.copy()
+    need = ["id", "date", "subject_id", "score", "difficulty", "notes", "user_id"]
+    out = _ensure_columns(out, need)
+
+    out["id"] = out["id"].astype("string").fillna("")
+    mask_blank = out["id"].str.strip() == ""
+    out.loc[mask_blank, "id"] = [str(uuid.uuid4()) for _ in range(mask_blank.sum())]
+
+    out["subject_id"] = out["subject_id"].astype("string").fillna("")
+    out["notes"] = out["notes"].astype("string").fillna("")
+
+    out["score"] = pd.to_numeric(out["score"], errors="coerce").clip(0, 100)
+    out["difficulty"] = (
+        pd.to_numeric(out["difficulty"], errors="coerce")
+        .fillna(3)
+        .round()
+        .clip(1, 5)
+        .astype(int)
+    )
+
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+
+    if user_id is not None:
+        out["user_id"] = str(user_id)
+
+    return out[need]
+
+def _merge_replace_current_user(existing: pd.DataFrame, incoming: pd.DataFrame, uid: str | None) -> pd.DataFrame:
+    """Replace ONLY the current user's rows in 'existing' with 'incoming'."""
+    if uid is None:
+        # admin mode: replace file
+        ex_aligned, inc_aligned = _align_columns(existing, incoming)
+        return inc_aligned
+
+    # ensure both have same columns
+    existing, incoming = _align_columns(existing, incoming)
+
+    # force user_id on incoming
+    incoming["user_id"] = str(uid)
+
+    others = existing[existing.get("user_id", "").astype(str) != str(uid)]
+    # keep last occurrence by id (incoming rows override)
+    cur = incoming.copy()
+    merged_cur = (
+        pd.concat([existing[existing.get("user_id", "").astype(str) == str(uid)], cur], ignore_index=True)
+        .drop_duplicates(subset=["id"], keep="last")
+    )
+    out = pd.concat([others, merged_cur], ignore_index=True)
+    return out
+
+def _append_current_user(existing: pd.DataFrame, incoming: pd.DataFrame, uid: str | None) -> pd.DataFrame:
+    """Append/overwrite by id ONLY for current user; keep everyone else intact."""
+    if uid is None:
+        # admin mode: append all and drop dup IDs (last wins)
+        existing, incoming = _align_columns(existing, incoming)
+        out = pd.concat([existing, incoming], ignore_index=True)
+        if "id" in out.columns:
+            out = out.drop_duplicates(subset=["id"], keep="last")
+        return out
+
+    existing, incoming = _align_columns(existing, incoming)
+    incoming["user_id"] = str(uid)
+
+    others = existing[existing.get("user_id", "").astype(str) != str(uid)]
+    current = existing[existing.get("user_id", "").astype(str) == str(uid)]
+
+    merged_cur = (
+        pd.concat([current, incoming], ignore_index=True)
+        .drop_duplicates(subset=["id"], keep="last")
+    )
+    out = pd.concat([others, merged_cur], ignore_index=True)
+    return out
 
 # ----------------------
 # Pages
@@ -495,7 +684,9 @@ if page == "📊 Dashboard":
     st.subheader(f"Study momentum (last {momentum_days} days)")
     if len(logs_df):
         logs = logs_df.copy()
-        logs["date"] = pd.to_datetime(logs["date"]).dt.date
+        logs["date"] = pd.to_datetime(logs["date"], errors="coerce", format="mixed").dt.date
+        logs = logs.dropna(subset=["date"])
+
         cutoff = date.today() - timedelta(days=momentum_days - 1)
         recent = logs[logs["date"] >= cutoff]
         daily = recent.groupby("date")["hours"].sum().reset_index().set_index("date")
@@ -504,9 +695,13 @@ if page == "📊 Dashboard":
         st.caption("No logs yet.")
 
     st.subheader("Knowledge curve (tests average by date)")
+        
+    
     if len(tests_df):
         curve = tests_df.copy()
-        curve["date"] = pd.to_datetime(curve["date"]).dt.date
+        curve["date"] = pd.to_datetime(curve["date"], errors="coerce", format="mixed").dt.date
+        curve = curve.dropna(subset=["date"])
+
         curve = curve.groupby("date")["score"].mean().reset_index().set_index("date")
         st.line_chart(curve)
     else:
@@ -528,16 +723,17 @@ if page == "📊 Dashboard":
             st.dataframe(ra.sort_values("date", ascending=False).head(10), use_container_width=True)
         else:
             st.caption("No recent logs.")
+            
 
 elif page == "📚 Subjects":
     st.title("Subjects & Priorities")
     st.caption("Keep credits accurate; adjust confidence weekly. Set exam date per subject.")
 
-    if "exam_date" not in subjects_df.columns:
-        subjects_df["exam_date"] = settings.get("default_exam_date", DEFAULT_SETTINGS["default_exam_date"])
+    # Make the dataframe editor-safe (especially exam_date -> datetime.date)
+    subjects_editor_df = sanitize_subjects_for_editor(subjects_df, settings)
 
     edited = st.data_editor(
-        subjects_df,
+        subjects_editor_df,
         column_config={
             "id": st.column_config.TextColumn(disabled=True),
             "name": st.column_config.TextColumn(label="Subject"),
@@ -563,10 +759,11 @@ elif page == "📚 Subjects":
                 "exam_date": s.get("default_exam_date", DEFAULT_SETTINGS["default_exam_date"]),
                 "user_id": st.session_state.user["id"] if st.session_state.user else "",
             }
+            # append and save
             edited = pd.concat([edited, pd.DataFrame([new])], ignore_index=True)
             if "exam_date" in edited.columns:
                 edited["exam_date"] = pd.to_datetime(edited["exam_date"], errors="coerce").dt.strftime("%Y-%m-%d")
-            # Merge with all subjects (replace this user's slice)
+
             if st.session_state.user:
                 uid = st.session_state.user["id"]
                 others = subjects_df_all[subjects_df_all.get("user_id", "") != uid]
@@ -580,6 +777,7 @@ elif page == "📚 Subjects":
         if st.button("💾 Save changes"):
             if "exam_date" in edited.columns:
                 edited["exam_date"] = pd.to_datetime(edited["exam_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+
             if st.session_state.user:
                 uid = st.session_state.user["id"]
                 others = subjects_df_all[subjects_df_all.get("user_id", "") != uid]
@@ -587,6 +785,7 @@ elif page == "📚 Subjects":
                 save_df(pd.concat([others, edited], ignore_index=True), SUBJECTS_CSV)
             else:
                 save_df(edited, SUBJECTS_CSV)
+
             st.success("Saved.")
             st.rerun()
 
@@ -597,6 +796,7 @@ elif page == "📚 Subjects":
         metrics[["name", "credits", "confidence", "exam_date", "priority", "hours", "avg_score", "days_left", "priority_gap"]],
         use_container_width=True,
     )
+
 
 elif page == "📝 Daily Log":
     st.title("Daily Log")
@@ -762,6 +962,7 @@ elif page == "⚙️ Settings/Backup":
     st.caption("Global options, weights, users, and import/export.")
     st.info(f"Data folder: {DATA_DIR}")
 
+    # Always create tabs first
     tabs = st.tabs(["App settings", "Manage users", "Backup/Export/Import"])
 
     # ---- App settings
@@ -775,7 +976,7 @@ elif page == "⚙️ Settings/Backup":
             with colB:
                 default_exam = st.date_input(
                     "Default exam date (for new subjects & fallback)",
-                    value=pd.to_datetime(settings.get("default_exam_date", DEFAULT_SETTINGS["default_exam_date"])).date(),
+                    value=pd.to_datetime(settings.get("default_exam_date", DEFAULT_SETTINGS["default_exam_date"]), errors="coerce").date(),
                 )
                 logs_weight = st.slider("Logs weight (avg score)", min_value=0.0, max_value=1.0, step=0.05, value=float(settings.get("logs_weight", 0.70)))
                 tests_weight = round(1.0 - logs_weight, 2)
@@ -870,50 +1071,193 @@ elif page == "⚙️ Settings/Backup":
                 z = zip_backup()
                 st.success(f"Backup created: {z.name}")
                 with open(z, "rb") as f:
-                    st.download_button("Download latest backup", data=f.read(), file_name=z.name)
+                    st.download_button("Download latest backup", data=f.read(), file_name=z.name, key="dl_backup_zip")
         with colb2:
             uploaded_zip = st.file_uploader("Restore from backup (ZIP)", type=["zip"])
             if uploaded_zip is not None:
-                # Save to temp then extract over data dir
                 tmp = BACKUPS_DIR / f"restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
                 with open(tmp, "wb") as f:
                     f.write(uploaded_zip.read())
+                from zipfile import ZipFile
                 with ZipFile(tmp, "r") as zf:
                     zf.extractall(DATA_DIR)
-                load_df.clear()
-                load_users.clear()
+                load_df.clear(); load_users.clear()
                 st.success("Backup restored.")
                 st.rerun()
 
+        st.divider()
         st.subheader("Export CSVs")
+
+        export_scope = st.radio(
+            "What to export?",
+            ["Current user only", "All data (admin)"],
+            horizontal=True,
+            key="export_scope",
+        )
+
+        # Build export frames
+        if export_scope == "Current user only" and st.session_state.user:
+            uid = st.session_state.user["id"]
+            subj_exp = subjects_df_all[subjects_df_all.get("user_id", "") == uid]
+            logs_exp = logs_df_all[logs_df_all.get("user_id", "") == uid]
+            tests_exp = tests_df_all[tests_df_all.get("user_id", "") == uid]
+        else:
+            subj_exp = subjects_df_all
+            logs_exp = logs_df_all
+            tests_exp = tests_df_all
+
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.download_button("Download subjects.csv", data=load_df(SUBJECTS_CSV).to_csv(index=False), file_name="subjects.csv")
+            st.download_button("Download subjects.csv", data=subj_exp.to_csv(index=False), file_name="subjects.csv", key="exp_sub")
         with c2:
-            st.download_button("Download logs.csv", data=load_df(LOGS_CSV).to_csv(index=False), file_name="logs.csv")
+            st.download_button("Download logs.csv", data=logs_exp.to_csv(index=False), file_name="logs.csv", key="exp_logs")
         with c3:
-            st.download_button("Download tests.csv", data=load_df(TESTS_CSV).to_csv(index=False), file_name="tests.csv")
+            st.download_button("Download tests.csv", data=tests_exp.to_csv(index=False), file_name="tests.csv", key="exp_tests")
 
+        st.divider()
         st.subheader("Import CSVs")
-        up1, up2, up3 = st.columns(3)
-        with up1:
-            f1 = st.file_uploader("subjects.csv", type=["csv"], key="u1")
-            if f1 is not None:
-                df = pd.read_csv(f1)
-                save_df(df, SUBJECTS_CSV)
-                st.success("subjects.csv imported. Reloading…")
-                st.rerun()
-        with up2:
-            f2 = st.file_uploader("logs.csv", type=["csv"], key="u2")
-            if f2 is not None:
-                df = pd.read_csv(f2)
-                save_df(df, LOGS_CSV)
-                st.success("logs.csv imported. Reloading…")
-                st.rerun()
-        with up3:
-            f3 = st.file_uploader("tests.csv", type=["csv"], key="u3")
-            if f3 is not None:
-                df = pd.read_csv(f3)
-                save_df(df, TESTS_CSV)
-                st.success("tests.csv imported. Reloading…")
+
+        st.caption("Choose how imported rows should be applied. Dates and IDs will be normalized automatically.")
+        import_mode = st.selectbox(
+            "Import mode",
+            [
+                "Append to current user (recommended)",
+                "Replace current user's data",
+                "Replace entire file (admin)",
+            ],
+            index=0,
+            help="Append = keep existing rows and add/overwrite by id. Replace current user = only your rows are replaced. Replace entire file = admin-level overwrite.",
+        )
+
+        # Normalizers + merges (helpers defined right here to avoid NameError)
+        def _ensure_id_strings(df):
+            if "id" in df.columns:
+                df["id"] = df["id"].astype(str)
+            return df
+
+        def normalize_subjects_df(df, default_exam, uid_or_none):
+            df = df.copy()
+            for c in ["id", "name"]:
+                if c not in df.columns:
+                    df[c] = ""
+            if "credits" not in df.columns: df["credits"] = 2
+            if "confidence" not in df.columns: df["confidence"] = 5
+            df["credits"] = pd.to_numeric(df["credits"], errors="coerce").fillna(1).astype(int)
+            df["confidence"] = pd.to_numeric(df["confidence"], errors="coerce").fillna(5).clip(0,10).astype(int)
+            df["exam_date"] = pd.to_datetime(df.get("exam_date"), errors="coerce")
+            df["exam_date"] = df["exam_date"].fillna(pd.to_datetime(default_exam))
+            df["exam_date"] = df["exam_date"].dt.strftime("%Y-%m-%d")
+            if uid_or_none is not None:
+                df["user_id"] = uid_or_none
+            df = _ensure_id_strings(df)
+            return df
+
+        def normalize_logs_df(df, uid_or_none):
+            df = df.copy()
+            for c in ["id","date","subject_id","hours","task","score","notes"]:
+                if c not in df.columns: df[c] = np.nan if c in ["hours","score"] else ""
+            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+            df["hours"] = pd.to_numeric(df["hours"], errors="coerce").fillna(0.0)
+            df["score"] = pd.to_numeric(df["score"], errors="coerce")
+            if uid_or_none is not None:
+                df["user_id"] = uid_or_none
+            df = _ensure_id_strings(df)
+            return df
+
+        def normalize_tests_df(df, uid_or_none):
+            df = df.copy()
+            for c in ["id","date","subject_id","score","difficulty","notes"]:
+                if c not in df.columns: df[c] = np.nan if c in ["score","difficulty"] else ""
+            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+            df["score"] = pd.to_numeric(df["score"], errors="coerce")
+            df["difficulty"] = pd.to_numeric(df["difficulty"], errors="coerce").fillna(3).clip(1,5).astype(int)
+            if uid_or_none is not None:
+                df["user_id"] = uid_or_none
+            df = _ensure_id_strings(df)
+            return df
+
+        def _merge_replace_current_user(existing, incoming, uid):
+            existing = existing.copy()
+            # drop current user's rows and add incoming
+            left = existing[existing.get("user_id","") != uid]
+            return pd.concat([left, incoming], ignore_index=True)
+
+        def _append_current_user(existing, incoming, uid):
+            existing = existing.copy()
+            # Upsert by 'id' for current user
+            if "id" not in incoming.columns:
+                incoming["id"] = [str(uuid.uuid4()) for _ in range(len(incoming))]
+            mask = existing.get("user_id","") == uid
+            cur = existing[mask]
+            others = existing[~mask]
+            # Remove any incoming ids from current, then append
+            cur = cur[~cur["id"].isin(incoming["id"])]
+            cur = pd.concat([cur, incoming], ignore_index=True)
+            return pd.concat([others, cur], ignore_index=True)
+
+        coli1, coli2, coli3 = st.columns(3)
+        with coli1:
+            f1 = st.file_uploader("subjects.csv", type=["csv"], key="imp_sub")
+        with coli2:
+            f2 = st.file_uploader("logs.csv", type=["csv"], key="imp_logs")
+        with coli3:
+            f3 = st.file_uploader("tests.csv", type=["csv"], key="imp_tests")
+
+        if st.button("Run import"):
+            if import_mode != "Replace entire file (admin)" and not st.session_state.user:
+                st.warning("Sign in to import for a specific user.")
+            else:
+                uid = st.session_state.user["id"] if st.session_state.user else None
+                default_exam = settings.get("default_exam_date", DEFAULT_SETTINGS["default_exam_date"])
+
+                if f1 is not None:
+                    try:
+                        incoming = pd.read_csv(f1)
+                        incoming = normalize_subjects_df(incoming, default_exam, uid if import_mode != "Replace entire file (admin)" else None)
+                        if import_mode == "Replace entire file (admin)":
+                            save_df(incoming, SUBJECTS_CSV)
+                        elif import_mode == "Replace current user's data":
+                            merged = _merge_replace_current_user(load_df(SUBJECTS_CSV), incoming, uid)
+                            save_df(merged, SUBJECTS_CSV)
+                        else:
+                            merged = _append_current_user(load_df(SUBJECTS_CSV), incoming, uid)
+                            save_df(merged, SUBJECTS_CSV)
+                        st.success("subjects.csv imported.")
+                    except Exception as e:
+                        st.error(f"subjects.csv import failed: {e}")
+
+                if f2 is not None:
+                    try:
+                        incoming = pd.read_csv(f2)
+                        incoming = normalize_logs_df(incoming, uid if import_mode != "Replace entire file (admin)" else None)
+                        if import_mode == "Replace entire file (admin)":
+                            save_df(incoming, LOGS_CSV)
+                        elif import_mode == "Replace current user's data":
+                            merged = _merge_replace_current_user(load_df(LOGS_CSV), incoming, uid)
+                            save_df(merged, LOGS_CSV)
+                        else:
+                            merged = _append_current_user(load_df(LOGS_CSV), incoming, uid)
+                            save_df(merged, LOGS_CSV)
+                        st.success("logs.csv imported.")
+                    except Exception as e:
+                        st.error(f"logs.csv import failed: {e}")
+
+                if f3 is not None:
+                    try:
+                        incoming = pd.read_csv(f3)
+                        incoming = normalize_tests_df(incoming, uid if import_mode != "Replace entire file (admin)" else None)
+                        if import_mode == "Replace entire file (admin)":
+                            save_df(incoming, TESTS_CSV)
+                        elif import_mode == "Replace current user's data":
+                            merged = _merge_replace_current_user(load_df(TESTS_CSV), incoming, uid)
+                            save_df(merged, TESTS_CSV)
+                        else:
+                            merged = _append_current_user(load_df(TESTS_CSV), incoming, uid)
+                            save_df(merged, TESTS_CSV)
+                        st.success("tests.csv imported.")
+                    except Exception as e:
+                        st.error(f"tests.csv import failed: {e}")
+
+                load_df.clear()
+                st.info("Import complete.")
                 st.rerun()
