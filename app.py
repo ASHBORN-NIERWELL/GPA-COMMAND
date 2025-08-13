@@ -65,8 +65,8 @@ if st.session_state.user is None:
     usernames = users_df_all["username"].tolist()
 
     # Top hero
-    st.title("Welcome to Nierwell GPA Manager ")
-    st.caption("Plan smarter, track consistently, and walk into exams prepared.")
+    st.title("Welcome to Nierwell GPA Manager")
+    st.caption("Walk into exams prepared.")
 
     # Load data once for preview (anonymous rows only)
     try:
@@ -82,15 +82,6 @@ if st.session_state.user is None:
     preview_subjects = subjects_df_all[subjects_df_all.get("user_id", "").astype(str).isin(blanks)].copy()
     preview_tests    = tests_df_all[tests_df_all.get("user_id", "").astype(str).isin(blanks)].copy()
 
-    # Quick preview metrics (NO total hours – multi-user safe)
-    colA, colC = st.columns(2)
-    with colA:
-        st.metric("Subjects (sample space)", f"{len(preview_subjects):,}")
-    with colC:
-        mean_score = pd.to_numeric(preview_tests.get("score"), errors="coerce").mean() if not preview_tests.empty else float("nan")
-        st.metric("Avg self‑test score", f"{0 if pd.isna(mean_score) else round(mean_score):d}%")
-
-    st.divider()
 
     # Feature + Auth columns
     left, right = st.columns([7, 5], gap="large")
