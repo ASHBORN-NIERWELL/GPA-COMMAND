@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 from datetime import datetime
 from zipfile import ZipFile
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -14,6 +15,7 @@ from core.config import (
     SUBJECTS_CSV,
     LOGS_CSV,
     TESTS_CSV,
+    AVATARS_DIR,            # <-- added (used to store branding image)
 )
 from core.storage import (
     load_df,
@@ -40,7 +42,7 @@ from core.normalize import (
 
 
 def render(settings, subjects_df_all, logs_df_all, tests_df_all):
-    st.title("Settings & Backup")
+    st.title("Settings & backup")
     st.caption("Global options, weights, users, and import/export.")
     st.info(f"Data folder: {DATA_DIR}")
 
@@ -83,11 +85,11 @@ def render(settings, subjects_df_all, logs_df_all, tests_df_all):
                 tests_weight = round(1.0 - logs_weight, 2)
                 st.write(f"Tests weight auto-set to **{int(tests_weight*100)}%**")
                 show_upcoming = st.checkbox(
-                    "Show Upcoming exams",
+                    "Show upcoming exams",
                     value=bool(settings.get("show_upcoming_exams", True)),
                 )
                 show_recent = st.checkbox(
-                    "Show Recent activity",
+                    "Show recent activity",
                     value=bool(settings.get("show_recent_activity", True)),
                 )
 
@@ -119,6 +121,68 @@ def render(settings, subjects_df_all, logs_df_all, tests_df_all):
                     save_df(s, SUBJECTS_CSV)
 
                 st.success("Settings saved.")
+                st.rerun()
+
+        st.divider()
+
+        # ------------------------------
+        # Branding: welcome background
+        # ------------------------------
+        st.subheader("Branding")
+        st.caption(
+            "Upload a background image (logo or pattern) for the welcome page. "
+            "PNG/JPG/WEBP are supported. The image will be centered and not tiled."
+        )
+
+        live_settings = load_settings()  # ensure latest values if other form reran
+        current_bg = str(live_settings.get("welcome_bg_path", "")).strip()
+        if current_bg:
+            st.write("**Current background:**")
+            try:
+                st.image(current_bg, caption=Path(current_bg).name, use_container_width=True)
+            except Exception:
+                st.info(f"Saved path: {current_bg}")
+
+        bg_file = st.file_uploader(
+            "Upload welcome background image",
+            type=["png", "jpg", "jpeg", "webp"],
+            key="bg_uploader"
+        )
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if bg_file is not None and st.button("Save background", type="primary"):
+                ext = (Path(bg_file.name).suffix or ".png").lower()
+                if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
+                    ext = ".png"
+
+                out_path = AVATARS_DIR / f"_branding_welcome{ext}"
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # Remove older versions with other extensions
+                for old in AVATARS_DIR.glob("_branding_welcome.*"):
+                    try:
+                        old.unlink()
+                    except Exception:
+                        pass
+
+                with open(out_path, "wb") as f:
+                    f.write(bg_file.read())
+
+                live_settings["welcome_bg_path"] = str(out_path)
+                save_settings(live_settings)
+                st.success("Background image updated.")
+                st.rerun()
+
+        with c2:
+            if current_bg and st.button("Remove background", type="secondary"):
+                try:
+                    Path(current_bg).unlink(missing_ok=True)
+                except Exception:
+                    pass
+                live_settings.pop("welcome_bg_path", None)
+                save_settings(live_settings)
+                st.success("Background image removed.")
                 st.rerun()
 
     # ---------------
