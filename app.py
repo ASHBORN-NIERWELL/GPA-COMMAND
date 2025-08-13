@@ -27,7 +27,12 @@ from core.auth import (
 from core.metrics import compute_metrics
 from core.gamify import compute_leaderboard
 
-st.set_page_config(page_title="NIERWELL GPA System", page_icon="🎯", layout="wide")
+st.set_page_config(
+    page_title="GPA Command Center",
+    page_icon="assets/logo.png",
+    layout="wide"
+)
+
 ensure_store()
 settings = load_settings()
 
@@ -60,7 +65,7 @@ if st.session_state.user is None:
     usernames = users_df_all["username"].tolist()
 
     # Top hero
-    st.title("Welcome to Nierwell GPA Manager 🎯")
+    st.title("Welcome to Nierwell GPA Manager ")
     st.caption("Plan smarter, track consistently, and walk into exams prepared.")
 
     # Load data once for preview (anonymous rows only)
