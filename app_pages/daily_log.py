@@ -18,7 +18,8 @@ def render(subjects_df, logs_df, logs_df_all):
     with st.form("add_log"):
         c1, c2, c3 = st.columns(3)
         with c1:
-            log_date = st.date_input("Date", value=pd.Timestamp.today().date())
+            # ensure clean date (no time); always store as ISO string later
+            log_date = pd.to_datetime(st.date_input("Date", value=pd.Timestamp.today().date())).date()
         with c2:
             subj_opts = {row["name"]: row["id"] for _, row in subjects_df.iterrows()}
             subj_name = st.selectbox("Subject", list(subj_opts.keys()) or ["— no subjects —"])
@@ -41,7 +42,8 @@ def render(subjects_df, logs_df, logs_df_all):
             else:
                 new_row = {
                     "id": str(uuid.uuid4()),
-                    "date": pd.to_datetime(log_date).strftime("%Y-%m-%d"),
+                    # always store as ISO string (prevents NaT/missing after CSV round-trip)
+                    "date": log_date.isoformat(),
                     "subject_id": subj_id,
                     "hours": float(hours),
                     "task": task,
@@ -49,7 +51,18 @@ def render(subjects_df, logs_df, logs_df_all):
                     "notes": notes,
                     "user_id": st.session_state.user["id"],
                 }
-                updated = pd.concat([logs_df_all, pd.DataFrame([new_row])], ignore_index=True)
+                row_df = pd.DataFrame([new_row])
+
+                # If logs_df_all is empty or None, skip concat to avoid dtype ambiguity warnings
+                if logs_df_all is not None and len(logs_df_all):
+                    updated = pd.concat([logs_df_all, row_df], ignore_index=True)
+                else:
+                    updated = row_df
+
+
+                # 🔒 normalize date BEFORE saving (handles legacy/mixed rows too)
+                updated["date"] = pd.to_datetime(updated["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+
                 save_df(updated, LOGS_CSV)
                 st.success("Log added.")
                 st.rerun()
@@ -98,11 +111,19 @@ def render(subjects_df, logs_df, logs_df_all):
                 for col in ["subject_id", "task", "notes"]:
                     if col in edited_view.columns:
                         edited_view[col] = edited_view[col].astype("string").fillna("")
+
+                # 🔒 force date -> ISO string so CSV round-trips keep it intact
+                edited_view["date"] = pd.to_datetime(edited_view["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+
                 edited_view["user_id"] = st.session_state.user["id"]
 
                 uid = st.session_state.user["id"]
                 others = logs_df_all[logs_df_all.get("user_id", "") != uid]
                 to_save_all = pd.concat([others, edited_view.drop(columns=["delete"], errors="ignore")], ignore_index=True)
+
+                # extra safety (handles any lingering mixed dtypes)
+                to_save_all["date"] = pd.to_datetime(to_save_all["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+
                 save_df(to_save_all, LOGS_CSV)
                 st.success("Edits saved.")
                 st.rerun()
@@ -114,9 +135,17 @@ def render(subjects_df, logs_df, logs_df_all):
             else:
                 uid = st.session_state.user["id"]
                 keep_current = edited_view[edited_view.get("delete", False) != True].drop(columns=["delete"], errors="ignore")
+
+                # 🔒 keep dates normalized when saving after delete
+                keep_current["date"] = pd.to_datetime(keep_current["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+
                 keep_current["user_id"] = uid
                 others = logs_df_all[logs_df_all.get("user_id", "") != uid]
                 remaining_all = pd.concat([others, keep_current], ignore_index=True)
+
+                # final guard
+                remaining_all["date"] = pd.to_datetime(remaining_all["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+
                 save_df(remaining_all, LOGS_CSV)
                 st.success("Selected logs deleted.")
                 st.rerun()

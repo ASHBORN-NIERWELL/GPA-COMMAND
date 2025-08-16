@@ -82,6 +82,10 @@ def compute_leaderboard(logs_all: pd.DataFrame, tests_all: pd.DataFrame, users_d
         "tests_avg":  users["user_id"].map(tests_avg).fillna(0.0),
         "test_bonus": users["user_id"].map(tests_bonus).fillna(0.0),
         "streak_cur": users["user_id"].map(streak_cur).fillna(0.0),
+        "streak_cur":  users["user_id"].map(streak_cur).fillna(0.0),
+        "streak_cur":  pd.to_numeric(users["user_id"].map(streak_cur), errors="coerce").fillna(0.0).astype(float),
+        "streak_best": pd.to_numeric(users["user_id"].map(streak_best), errors="coerce").fillna(0.0).astype(float),
+        "streak_best": users["user_id"].map(streak_best).fillna(0.0),
         "streak_best":users["user_id"].map(streak_best).fillna(0.0),
     })
 
