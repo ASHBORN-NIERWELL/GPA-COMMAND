@@ -2,8 +2,15 @@ from __future__ import annotations
 import os, sys
 from pathlib import Path
 
+from pathlib import Path
+BASE_DIR = Path(__file__).resolve().parent.parent
+FIREBASE_CRED_PATH = BASE_DIR / "nierwell-gpa-system-firebase-adminsdk-fbsvc-01df631bc4.json"
+
+
 # App identity
 APP_NAME = "NIERWELL GPA WIZARD"
+
+USE_FIREBASE = True  # flip to False if you ever want to go back to CSV
 
 # Defaults
 DEFAULT_SETTINGS = {

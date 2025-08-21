@@ -29,47 +29,44 @@ except Exception:
 # -----------------------
 # Avatar helpers
 # -----------------------
+from .config import AVATARS_DIR, USERS_CSV, SUBJECTS_CSV, LOGS_CSV, TESTS_CSV, USE_FIREBASE
+# ...
 def set_user_avatar(user_id: str, file_bytes: bytes, filename: str) -> str:
-    """
-    Save avatar to AVATARS_DIR/{user_id}.ext and update users.csv (avatar_path).
-    Returns the stored path as string.
-    """
     ext = (Path(filename).suffix or ".png").lower()
     if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
         ext = ".png"
 
-    out_path = AVATARS_DIR / f"{user_id}{ext}"
-    out_path.parent.mkdir(parents=True, exist_ok=True)  # ensure folder exists
-
-    # Remove any previous avatar with a different extension to avoid clutter
-    for old in AVATARS_DIR.glob(f"{user_id}.*"):
-        if old.suffix.lower() != ext:
-            try:
-                old.unlink()
-            except Exception:
-                pass
-
-    with open(out_path, "wb") as f:
-        f.write(file_bytes)
+    if USE_FIREBASE:
+        # upload to Firebase Storage
+        from .firebase_store import upload_bytes
+        path_in_bucket = f"avatars/{user_id}{ext}"
+        upload_bytes(path_in_bucket, file_bytes, content_type=f"image/{ext.lstrip('.')}")
+        stored = f"gs://{st.secrets.FIREBASE.get('storage_bucket')}/{path_in_bucket}"
+    else:
+        out_path = AVATARS_DIR / f"{user_id}{ext}"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        for old in AVATARS_DIR.glob(f"{user_id}.*"):
+            if old.suffix.lower() != ext:
+                try: old.unlink()
+                except Exception: pass
+        with open(out_path, "wb") as f:
+            f.write(file_bytes)
+        stored = str(out_path)
 
     users = load_users()
     idx = users.index[users["id"] == user_id]
     if len(idx):
-        users.loc[idx[0], "avatar_path"] = str(out_path)
+        users.loc[idx[0], "avatar_path"] = stored
         save_users(users)
-
-    return str(out_path)
-
+    return stored
 
 def get_user_avatar_path(user_id: str) -> str:
     users = load_users()
     row = users[users["id"] == user_id]
     if len(row):
         p = str(row.iloc[0].get("avatar_path", "")).strip()
-        if p and Path(p).exists():
-            return p
-    return ""  # caller can fall back to a placeholder
-
+        return p
+    return ""
 
 # -----------------------
 # Password helpers
