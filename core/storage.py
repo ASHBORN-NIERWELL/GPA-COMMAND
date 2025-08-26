@@ -452,3 +452,102 @@ def save_settings(s: dict) -> None:
             _firestore_save_settings(s)
         except Exception as e:
             _fb_log(f"Firestore save_settings failed: {e}")
+
+# --- Add to: core/storage.py ---
+
+import io
+from zipfile import ZipFile
+import pandas as pd
+
+def _read_csv_loose(b: bytes) -> pd.DataFrame:
+    bio = io.BytesIO(b)
+    try:
+        return pd.read_csv(bio, sep=None, engine="python", encoding="utf-8-sig")
+    except Exception:
+        bio.seek(0)
+        return pd.read_csv(bio, encoding_errors="ignore")
+
+def _align_cols(a: pd.DataFrame, b: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    cols = sorted(set(a.columns).union(set(b.columns)))
+    return a.reindex(columns=cols, fill_value=pd.NA), b.reindex(columns=cols, fill_value=pd.NA)
+
+def _merge_all_rows(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
+    """Union by id (if present); keep newest duplicate (incoming wins)."""
+    if existing is None or len(existing) == 0:
+        return incoming.copy()
+    ex, inc = _align_cols(existing, incoming)
+    out = pd.concat([ex, inc], ignore_index=True)
+    if "id" in out.columns:
+        out = out.drop_duplicates(subset=["id"], keep="last")
+    return out
+
+def _normalize_for_file(df: pd.DataFrame, file_name: str, default_exam: str) -> pd.DataFrame:
+    """
+    Normalize columns minimally so app logic + charts remain happy.
+    We *do not* strip other users; every row stays as-is (multi-user CSV).
+    """
+    from .normalize import normalize_subjects_df, normalize_logs_df, normalize_tests_df
+    if file_name == "subjects.csv":
+        # do not force user_id; pass None to preserve all users
+        return normalize_subjects_df(df, default_exam=default_exam, user_id=None)
+    if file_name == "logs.csv":
+        return normalize_logs_df(df, user_id=None)
+    if file_name == "tests.csv":
+        return normalize_tests_df(df, user_id=None)
+    if file_name == "users.csv":
+        # ensure required columns exist
+        need = ["id", "username", "password_hash", "created_at", "avatar_path"]
+        out = df.copy()
+        for c in need:
+            if c not in out.columns:
+                out[c] = "" if c in {"id","username","password_hash","created_at","avatar_path"} else pd.NA
+        return out[need]
+    return df
+
+def restore_from_zip_all_users(zip_bytes: bytes, mode: str = "merge") -> dict:
+    """
+    Restore data for ALL users from a backup ZIP.
+    mode = 'merge' (dedupe by id, incoming wins) or 'replace_all' (overwrite file).
+    Returns a small report dict.
+    """
+    assert mode in {"merge", "replace_all"}
+
+    report = {"mode": mode, "restored": {}}
+    default_exam = load_settings().get("default_exam_date", DEFAULT_SETTINGS["default_exam_date"])
+
+    with ZipFile(io.BytesIO(zip_bytes)) as zf:
+        # Handle subjects/logs/tests/users
+        for name, path in [
+            ("subjects.csv", SUBJECTS_CSV),
+            ("logs.csv",     LOGS_CSV),
+            ("tests.csv",    TESTS_CSV),
+            ("users.csv",    USERS_CSV),
+        ]:
+            if name in zf.namelist():
+                raw = zf.read(name)
+                incoming = _read_csv_loose(raw)
+                incoming = _normalize_for_file(incoming, name, default_exam)
+
+                if mode == "merge":
+                    existing = load_df(path) if name != "users.csv" else pd.read_csv(USERS_CSV) if USERS_CSV.exists() else pd.DataFrame()
+                    merged = _merge_all_rows(existing, incoming)
+                    save_df(merged, path) if name != "users.csv" else merged.to_csv(USERS_CSV, index=False, encoding="utf-8")
+                else:
+                    save_df(incoming, path) if name != "users.csv" else incoming.to_csv(USERS_CSV, index=False, encoding="utf-8")
+
+                report["restored"][name] = len(incoming)
+
+        # Optional settings.json
+        if "settings.json" in zf.namelist():
+            try:
+                s = json.loads(zf.read("settings.json").decode("utf-8"))
+                # backfill + save (keeps Firebase in sync if enabled)
+                base = load_settings(); base.update(s or {})
+                save_settings(base)
+                report["restored"]["settings.json"] = "ok"
+            except Exception as _e:
+                report["restored"]["settings.json"] = "failed"
+
+    # Make sure caches are fresh
+    load_df.clear()
+    return report
