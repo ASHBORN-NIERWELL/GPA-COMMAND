@@ -76,12 +76,13 @@ from core.gamify import compute_leaderboard
 # ==============================
 st.set_page_config(
     page_title="Nierwell GPA System",
-    page_icon="assets/logo.png",  # safer fallback than a file path; swap back to "assets/logo.png" if you have it
+    page_icon="assets/logo.png",
     layout="wide",
 )
 
 # Small CSS helper for a clean, techy look (dark, subtle neon accents)
 def inject_base_css(bg_path: str = ""):
+    # optional background from settings
     bg_css = (
         f'url("file:///{bg_path.replace("\\\\","/")}"), radial-gradient(80% 120% at 100% 0%, #0f172a 10%, #0b1022 70%)'
         if bg_path else
@@ -96,10 +97,11 @@ def inject_base_css(bg_path: str = ""):
                 --nw-card-border: rgba(255,255,255,0.10);
                 --nw-fg: #d8e1ff;
                 --nw-dim: #a7b0d8;
-                --nw-accent: #5eead4;
-                --nw-accent-2: #7c3aed;
+                --nw-accent: #5eead4;   /* teal */
+                --nw-accent-2: #7c3aed; /* purple */
             }}
 
+            /* App background (with optional image) */
             .stApp {{
                 background-image: {bg_css};
                 background-size: cover;
@@ -108,29 +110,44 @@ def inject_base_css(bg_path: str = ""):
                 color: var(--nw-fg);
             }}
 
-            .block-container {{ padding-top: 2.2rem; }}
-            h1, h2, h3 {{ letter-spacing: 0.2px; }}
+            /* Tighten content */
+            .block-container {{
+                padding-top: 2.2rem;
+            }}
+
+            /* Headings */
+            h1, h2, h3 {{
+                letter-spacing: 0.2px;
+            }}
             h1 {{
                 font-weight: 700;
                 background: linear-gradient(90deg, var(--nw-accent), var(--nw-accent-2));
-                -webkit-background-clip: text; background-clip: text; color: transparent;
+                -webkit-background-clip: text;
+                background-clip: text;
+                color: transparent;
                 margin-bottom: 0.25rem;
             }}
             .nw-subtle {{ color: var(--nw-dim); }}
 
+            /* Tech chips */
             .nw-chip {{
                 display:inline-block; padding:7px 12px; margin:6px 8px 0 0;
                 border-radius:9999px; border:1px solid var(--nw-card-border);
                 background: var(--nw-card); font-size:.92rem;
             }}
 
+            /* Glass card */
             .nw-card {{
-                border-radius: 18px; border: 1px solid var(--nw-card-border);
-                background: var(--nw-card); box-shadow: 0 20px 60px rgba(0,0,0,.35);
-                backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+                border-radius: 18px;
+                border: 1px solid var(--nw-card-border);
+                background: var(--nw-card);
+                box-shadow: 0 20px 60px rgba(0,0,0,.35);
+                backdrop-filter: blur(10px);
+                -webkit-backdrop-filter: blur(10px);
                 padding: clamp(18px, 3.6vw, 28px);
             }}
 
+            /* Logo top-right */
             .nw-logo {{
                 position: fixed; top: 14px; right: 18px; z-index: 9999;
                 padding: 6px 8px; border-radius: 12px;
@@ -140,21 +157,32 @@ def inject_base_css(bg_path: str = ""):
             }}
             .nw-logo img {{ height: 28px; }}
 
+            /* Buttons */
             .stButton > button[kind="primary"] {{
                 border-radius: 12px !important;
                 background: linear-gradient(90deg, var(--nw-accent), var(--nw-accent-2)) !important;
-                color: #0b1022 !important; font-weight: 700 !important; border: 0 !important;
+                color: #0b1022 !important; font-weight: 700 !important;
+                border: 0 !important;
             }}
-            .stButton > button {{ border-radius: 12px !important; }}
+            .stButton > button {{
+                border-radius: 12px !important;
+            }}
 
-            .stTextInput input, .stNumberInput input, .stDateInput input,
-            .stSelectbox div[data-baseweb="select"] > div {{ border-radius: 12px !important; }}
+            /* Inputs */
+            .stTextInput input, .stNumberInput input, .stDateInput input, .stSelectbox div[data-baseweb="select"] > div {{
+                border-radius: 12px !important;
+            }}
 
+            /* Sidebar style */
             [data-testid="stSidebar"] > div:first-child {{
-                background: #0d1430; border-right: 1px solid rgba(255,255,255,0.08);
+                background: #0d1430;
+                border-right: 1px solid rgba(255,255,255,0.08);
             }}
+
+            /* Hide default footer */
             footer {{ visibility: hidden; }}
 
+            /* Welcome screen: center layout */
             .nw-center {{
                 min-height: calc(100vh - 120px);
                 display:flex; align-items:center; justify-content:center;
@@ -184,7 +212,7 @@ inject_base_css(settings.get("welcome_bg_path", ""))
 if st.session_state.user is None:
     bg_path = str(settings.get("welcome_bg_path", "")).strip()
 
-    # Themed background layer
+    # Techy gradient + glass card (no layout changes)
     st.markdown(
         """
         <style>
@@ -204,15 +232,22 @@ if st.session_state.user is None:
             padding: 24px 20px;
             box-shadow: 0 10px 30px rgba(0,0,0,0.25);
         }
-        .muted { color: #9aa4b2 !important; }
-        .tip  { color: #a0f0ff !important; font-size: 0.9rem; }
-        .tiny { font-size: 0.85rem; color: #93a0ad; }
-        .spacer-16 { height: 16px; }
+        /* tighten right column content width slightly */
+        section[data-testid="stSidebar"] + div [data-testid="column"]:last-child > div:has(> .glass) {
+            max-width: 520px;
+            margin-left: auto;
+        }
+        .muted {{ color: #9aa4b2 !important; }}
+        .tip  {{ color: #a0f0ff !important; font-size: 0.9rem; }}
+        .tiny {{ font-size: 0.85rem; color: #93a0ad; }}
+        .spacer-8 {{ height: 8px; }}
+        .spacer-16 {{ height: 16px; }}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
+    # Optional center graphic (user-configurable)
     if bg_path:
         css_bg = bg_path.replace("\\", "/")
         st.markdown(
@@ -235,6 +270,7 @@ if st.session_state.user is None:
     users_df_all = load_users()
     usernames = users_df_all["username"].tolist()
 
+    # Read any remembered user from settings (preselect if present)
     remembered_user = str(settings.get("remembered_user", "")).strip()
     remembered_idx = (["— select —"] + usernames).index(remembered_user) if remembered_user in usernames else 0
 
@@ -279,15 +315,9 @@ if st.session_state.user is None:
                         st.success("Restore complete.")
                         st.json(rep)  # or render a compact summary
                         st.toast("Data restored. You can now sign in.", icon="✅")
-                        # inside the welcome screen restore expander, after we compute `rep = restore_from_zip_all_users(...)`
-                        st.success("Restore complete.")
-                        st.json(rep)
-                        st.toast("Data restored. You can now sign in.", icon="✅")
-
-                        # 🔧 force fresh reads for load_users(), load_df(), etc.
+                        # Force fresh reads for load_users(), load_df(), etc.
                         st.cache_data.clear()
                         st.rerun()
-
             with col2:
                 st.caption("CSV files used by the app:")
                 st.code(f"{SUBJECTS_CSV}\n{LOGS_CSV}\n{TESTS_CSV}\n{USERS_CSV}")
@@ -298,6 +328,7 @@ if st.session_state.user is None:
         tab_login, tab_signup = st.tabs(["Login", "Sign up"])
 
         with tab_login:
+            # Quick pick for remembered user (does not auto-login)
             if remembered_user:
                 st.markdown(
                     f"**Quick pick:** {remembered_user}  "
@@ -305,6 +336,7 @@ if st.session_state.user is None:
                 )
                 st.write("")
 
+            # Preselect remembered user if present
             sel_user = st.selectbox(
                 "User",
                 ["— select —"] + usernames,
@@ -328,14 +360,13 @@ if st.session_state.user is None:
                         st.error("User not found.")
                     else:
                         if _verify_password(pw, str(row.get("password_hash", ""))):
-                            # Remember me
+                            # Persist 'remember me' in settings.json
                             settings_live = load_settings()
                             if remember_me:
                                 settings_live["remembered_user"] = sel_user
                             else:
                                 settings_live.pop("remembered_user", None)
-                            save_df(pd.DataFrame(), LOGS_CSV)  # no-op touch ensures module import path is fine
-                            from core.storage import save_settings
+                            from core.storage import save_settings  # local import to avoid top clutter
                             save_settings(settings_live)
 
                             st.session_state.user = {"id": row["id"], "username": row["username"]}
@@ -357,6 +388,7 @@ if st.session_state.user is None:
                 else:
                     uid = create_user(new_user.strip(), new_pw.strip())
                     if uid:
+                        # also remember this freshly created user for convenience
                         settings_live = load_settings()
                         settings_live["remembered_user"] = new_user.strip()
                         from core.storage import save_settings
@@ -386,11 +418,11 @@ if st.session_state.get("user"):
         "“If we can’t protect the Earth, you can be damn sure we’ll avenge it.”",
         "“I shouldn’t be alive, unless it was for a reason.”",
         "“It’s not about how much we lost, it’s about how much we have left.”",
-        "“Sometimes you have to learn to run before you can walk.”",
+        "“Sometimes you have to learn to run before you can walk.”"
     ]
     st.caption(f"💬 *{random.choice(ironman_quotes)}*")
 
-# Sidebar — account + nav (runs only after welcome screen due to st.stop())
+# Sidebar — account + nav
 with st.sidebar:
     st.markdown("Account")
     st.write(f"**{st.session_state.user['username']}**")
