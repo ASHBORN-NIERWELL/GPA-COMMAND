@@ -1,33 +1,90 @@
+# app_pages/dashboard.py
 from __future__ import annotations
 import pandas as pd
 import streamlit as st
 from datetime import timedelta
+
 from core.metrics import compute_metrics, weighted_readiness
+from core.gamify import get_achievement_states
+
+
+# ----- Minimal CSS for the achievement bar -----
+_ACH_CSS = """
+<style>
+.ach-row{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 8px}
+.ach{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:12px;
+     border:1px solid var(--border, #2f2f2f);background:rgba(255,255,255,.02)}
+.ach.locked{opacity:.55}
+.ring{width:22px;height:22px;border-radius:50%;
+      background: conic-gradient(var(--ok,#22c55e) calc(var(--p)*1%), #444 0);
+      border:2px solid #333}
+.ach .label{font-size:.92rem;font-weight:600}
+.badge{font-size:.75rem;padding:2px 8px;border-radius:10px;border:1px solid #3a3a3a}
+</style>
+"""
+
+def _render_achievement_bar(subjects_df, logs_df, tests_df):
+    st.markdown(_ACH_CSS, unsafe_allow_html=True)
+    st.markdown("### 🏆 Achievements")
+    states = get_achievement_states(subjects_df, logs_df, tests_df)
+    html = ['<div class="ach-row">']
+    for s in states:
+        pct = int(100 * float(s["progress"]))
+        ok = "#22c55e" if s.get("unlocked") else "#888888"
+        html.append(
+            f'<div class="ach {"locked" if not s.get("unlocked") else ""}">'
+            f'<div class="ring" style="--p:{pct};--ok:{ok}"></div>'
+            f'<div class="label">{s["label"]}</div>'
+            f'</div>'
+        )
+    html.append("</div>")
+    st.markdown("".join(html), unsafe_allow_html=True)
 
 
 def render(subjects_df, logs_df, tests_df, settings):
     st.title(f"GPA Command Center — {settings.get('semester','Sem')}")
 
+    # ----- Achievement Bar (top) -----
+    _render_achievement_bar(subjects_df, logs_df, tests_df)
+
     # ---------- Metrics ----------
     metrics = compute_metrics(subjects_df, logs_df, tests_df)
 
+    # 👉 Ensure we have a 'completed' column (merge from subjects_df, else default False)
+    if "completed" not in metrics.columns:
+        if "completed" in subjects_df.columns:
+            # merge by id (compute_metrics keeps 'id' from subjects)
+            metrics = metrics.merge(
+                subjects_df[["id", "completed"]],
+                on="id",
+                how="left",
+            )
+        else:
+            metrics["completed"] = False
+
+    # Active view (don’t prompt completed)
+    metrics_active = metrics[metrics["completed"] != True] if not metrics.empty else metrics
+
     c1, c2, c3 = st.columns(3)
     with c1:
-        if not metrics.empty:
-            focus_row = metrics.sort_values("priority_gap", ascending=False).iloc[0]
+        focus_src = metrics_active if not metrics_active.empty else metrics
+        if not focus_src.empty:
+            focus_row = focus_src.sort_values("priority_gap", ascending=False).iloc[0]
             st.metric("Focus today on", focus_row["name"], delta=f"Gap {focus_row['priority_gap']:.2f}")
         else:
             st.info("Add subjects to get a focus suggestion.")
     with c2:
-        ready = weighted_readiness(metrics) if not metrics.empty else 0.0
+        base = metrics_active if not metrics_active.empty else metrics
+        ready = weighted_readiness(base) if not base.empty else 0.0
         st.metric("Overall readiness (weighted)", f"{round(ready*100):d}%")
     with c3:
         st.metric("Study momentum", f"{len(logs_df)} logs • {len(tests_df)} tests")
 
     focus_n = int(settings.get("focus_n", 3))
     st.subheader(f"Top {focus_n} focus areas (by priority gap)")
-    if not metrics.empty:
-        topn = metrics.sort_values("priority_gap", ascending=False).head(focus_n)[
+    table_src = metrics_active if not metrics_active.empty else metrics
+    if not table_src.empty:
+        topn = table_src.sort_values("priority_gap", ascending=False).head(focus_n)[
             ["name", "priority_gap", "avg_score", "hours", "days_left"]
         ]
         st.dataframe(topn.set_index("name"), use_container_width=True)
@@ -35,7 +92,10 @@ def render(subjects_df, logs_df, tests_df, settings):
         st.caption("No subjects yet.")
 
     st.subheader("Hours by subject")
-    if not metrics.empty and "hours" in metrics:
+    if not metrics_active.empty and "hours" in metrics_active:
+        hb = metrics_active[["name", "hours"]].set_index("name")
+        st.bar_chart(hb)
+    elif not metrics.empty and "hours" in metrics:
         hb = metrics[["name", "hours"]].set_index("name")
         st.bar_chart(hb)
     else:
@@ -48,7 +108,6 @@ def render(subjects_df, logs_df, tests_df, settings):
 
     if len(logs_df):
         logs = logs_df.copy()
-        # Safe parsing
         logs["date"] = pd.to_datetime(logs["date"], errors="coerce").dt.normalize()
         logs["hours"] = pd.to_numeric(logs.get("hours"), errors="coerce").fillna(0.0)
         logs = logs.dropna(subset=["date"])
@@ -56,7 +115,6 @@ def render(subjects_df, logs_df, tests_df, settings):
         if logs.empty:
             st.caption("No valid logs to plot.")
         else:
-            # Controls
             c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
             with c1:
                 range_mode = st.radio("Range", ["Last N days", "Custom"], horizontal=True, key="mom_range")
@@ -71,7 +129,6 @@ def render(subjects_df, logs_df, tests_df, settings):
             if sel_subj:
                 logs = logs[logs["subject_id"].isin([subj_map[n] for n in sel_subj])]
 
-            # Pick window
             if range_mode == "Last N days":
                 default_days = int(settings.get("momentum_days", 7))
                 n_days = st.slider("Days", 3, 180, default_days, 1, key="mom_days")
@@ -103,7 +160,6 @@ def render(subjects_df, logs_df, tests_df, settings):
                 start = end - pd.Timedelta(days=89)
                 window = logs[(logs["date"] >= start) & (logs["date"] <= end)]
 
-            # Aggregate & zero-fill
             if agg == "Weekly":
                 window = window.groupby(pd.Grouper(key="date", freq="W-MON"), as_index=True)["hours"].sum().to_frame()
                 idx = pd.date_range(start, end, freq="W-MON")
@@ -113,19 +169,16 @@ def render(subjects_df, logs_df, tests_df, settings):
             window = window.reindex(idx, fill_value=0.0)
             window.index.name = "date"
 
-            # Rolling average (causal, not centered)
             roll_on = st.checkbox("Show rolling average", value=True, key="mom_roll")
             if roll_on:
                 win = 3 if agg == "Daily" else 2
                 window["roll"] = window["hours"].rolling(win, min_periods=1).mean()
 
-            # Diagnostics
             total_h = float(window["hours"].sum())
             active_bins = int((window["hours"] > 0).sum())
             span_text = f"{start.date()} → {end.date()}"
             st.caption(f"{agg} span: {span_text} • total {total_h:.1f} h • active {active_bins}/{len(window)} bins")
 
-            # Plot
             if chart_kind == "Bar":
                 st.bar_chart(window["hours"])
                 if roll_on:
@@ -164,11 +217,7 @@ def render(subjects_df, logs_df, tests_df, settings):
             if kc_sel_subj:
                 curve = curve[curve["subject_id"].isin([subj_map[n] for n in kc_sel_subj])]
 
-            # Window slider (days)
-            kc_days = st.slider(
-                "Window (days)", 7, 365,
-                max(30, int(settings.get("momentum_days", 7) * 4)), 1, key="kc_days"
-            )
+            kc_days = st.slider("Window (days)", 7, 365, max(30, int(settings.get("momentum_days", 7) * 4)), 1, key="kc_days")
             end = pd.Timestamp.today().normalize()
             start = end - pd.Timedelta(days=kc_days - 1)
             curw = curve[(curve["date"] >= start) & (curve["date"] <= end)]

@@ -191,10 +191,14 @@ def ensure_store() -> None:
         except Exception:
             pass
 
-    # subjects.csv
+    # subjects.csv (+ backfill NEW columns)
     if not SUBJECTS_CSV.exists():
         df = pd.DataFrame(INITIAL_SUBJECTS)
         df["user_id"] = ""
+        # NEW columns
+        df["completed"] = False
+        df["completed_at"] = ""
+        df["progress_snapshot"] = 0.0
         df.to_csv(SUBJECTS_CSV, index=False, encoding="utf-8")
     else:
         try:
@@ -206,6 +210,23 @@ def ensure_store() -> None:
             if "user_id" not in df.columns:
                 df["user_id"] = ""
                 changed = True
+            # --- NEW columns backfill ---
+            if "completed" not in df.columns:
+                df["completed"] = False
+                changed = True
+            else:
+                # normalize to bool (handles "True"/"False"/1/0/NAs)
+                df["completed"] = df["completed"].astype(str).str.lower().isin(["true", "1", "yes"])
+            if "completed_at" not in df.columns:
+                df["completed_at"] = ""
+                changed = True
+            else:
+                df["completed_at"] = pd.to_datetime(df["completed_at"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+            if "progress_snapshot" not in df.columns:
+                df["progress_snapshot"] = 0.0
+                changed = True
+            else:
+                df["progress_snapshot"] = pd.to_numeric(df["progress_snapshot"], errors="coerce").fillna(0.0)
             if changed:
                 df.to_csv(SUBJECTS_CSV, index=False, encoding="utf-8")
         except Exception:
@@ -267,8 +288,17 @@ def _df_dates_to_iso(df: pd.DataFrame, file_name_lower: str) -> pd.DataFrame:
     try:
         if file_name_lower in {"logs.csv", "tests.csv"} and "date" in out.columns:
             out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-        if file_name_lower == "subjects.csv" and "exam_date" in out.columns:
-            out["exam_date"] = pd.to_datetime(out["exam_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        if file_name_lower == "subjects.csv":
+            if "exam_date" in out.columns:
+                out["exam_date"] = pd.to_datetime(out["exam_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+            # NEW: normalize completed_at as date string
+            if "completed_at" in out.columns:
+                out["completed_at"] = pd.to_datetime(out["completed_at"], errors="coerce").dt.strftime("%Y-%m-%d")
+            # Ensure types for new fields
+            if "completed" in out.columns:
+                out["completed"] = out["completed"].astype(str).str.lower().isin(["true", "1", "yes"])
+            if "progress_snapshot" in out.columns:
+                out["progress_snapshot"] = pd.to_numeric(out["progress_snapshot"], errors="coerce").fillna(0.0)
     except Exception:
         pass
     return out
@@ -291,8 +321,17 @@ def _firestore_fetch_collection(coll_name: str) -> pd.DataFrame:
     # Parse dates for UI use
     if coll_name in {"logs", "tests"} and "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    if coll_name == "subjects" and "exam_date" in df.columns:
-        df["exam_date"] = pd.to_datetime(df["exam_date"], errors="coerce")
+    if coll_name == "subjects":
+        if "exam_date" in df.columns:
+            df["exam_date"] = pd.to_datetime(df["exam_date"], errors="coerce")
+        # NEW: parse completed_at for UI sorting/formatting; keep NaT if empty
+        if "completed_at" in df.columns:
+            df["completed_at"] = pd.to_datetime(df["completed_at"], errors="coerce")
+        # Normalize bool + numeric types
+        if "completed" in df.columns:
+            df["completed"] = df["completed"].astype(bool)
+        if "progress_snapshot" in df.columns:
+            df["progress_snapshot"] = pd.to_numeric(df["progress_snapshot"], errors="coerce").fillna(0.0)
     return df
 
 
@@ -370,8 +409,11 @@ def load_df(path: Path) -> pd.DataFrame:
                 # Ensure parsed dates for UI
                 if name in {"logs.csv", "tests.csv"} and "date" in df.columns:
                     df["date"] = pd.to_datetime(df["date"], errors="coerce")
-                if name == "subjects.csv" and "exam_date" in df.columns:
-                    df["exam_date"] = pd.to_datetime(df["exam_date"], errors="coerce")
+                if name == "subjects.csv":
+                    if "exam_date" in df.columns:
+                        df["exam_date"] = pd.to_datetime(df["exam_date"], errors="coerce")
+                    if "completed_at" in df.columns:
+                        df["completed_at"] = pd.to_datetime(df["completed_at"], errors="coerce")
                 return df
             except Exception as e:
                 _fb_log(f"Firestore load failure for {coll}: {e}")
@@ -382,7 +424,13 @@ def load_df(path: Path) -> pd.DataFrame:
         if name in {"logs.csv", "tests.csv"}:
             return pd.read_csv(path, parse_dates=["date"], dayfirst=False, encoding="utf-8")
         if name == "subjects.csv":
-            return pd.read_csv(path, parse_dates=["exam_date"], dayfirst=False, encoding="utf-8")
+            df = pd.read_csv(path, parse_dates=["exam_date", "completed_at"], dayfirst=False, encoding="utf-8")
+            # Normalize new columns if present
+            if "completed" in df.columns:
+                df["completed"] = df["completed"].astype(str).str.lower().isin(["true", "1", "yes"])
+            if "progress_snapshot" in df.columns:
+                df["progress_snapshot"] = pd.to_numeric(df["progress_snapshot"], errors="coerce").fillna(0.0)
+            return df
         return pd.read_csv(path, encoding="utf-8")
     except Exception:
         return pd.read_csv(path, engine="python", encoding_errors="ignore")
@@ -489,7 +537,21 @@ def _normalize_for_file(df: pd.DataFrame, file_name: str, default_exam: str) -> 
     from .normalize import normalize_subjects_df, normalize_logs_df, normalize_tests_df
     if file_name == "subjects.csv":
         # do not force user_id; pass None to preserve all users
-        return normalize_subjects_df(df, default_exam=default_exam, user_id=None)
+        out = normalize_subjects_df(df, default_exam=default_exam, user_id=None)
+        # Ensure new columns exist after normalization
+        if "completed" not in out.columns:
+            out["completed"] = False
+        else:
+            out["completed"] = out["completed"].astype(str).str.lower().isin(["true", "1", "yes"])
+        if "completed_at" not in out.columns:
+            out["completed_at"] = ""
+        else:
+            out["completed_at"] = pd.to_datetime(out["completed_at"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+        if "progress_snapshot" not in out.columns:
+            out["progress_snapshot"] = 0.0
+        else:
+            out["progress_snapshot"] = pd.to_numeric(out["progress_snapshot"], errors="coerce").fillna(0.0)
+        return out
     if file_name == "logs.csv":
         return normalize_logs_df(df, user_id=None)
     if file_name == "tests.csv":

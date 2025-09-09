@@ -3,21 +3,24 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Any, Dict
 
+import pandas as pd
 import streamlit as st
 
-# Lazy imports inside init
+# Lazy (cached) bootstrap for Firebase Admin
 firebase_admin = None  # type: ignore
 
+
 @st.cache_resource(show_spinner=False)
-def _init_firebase():
+def _init_firebase() -> Tuple[Any, Any]:
     """
     Idempotent Firebase Admin init using:
-    1) Streamlit Secrets [firebase]  (recommended)
-       - either field-by-field TOML or raw JSON under `service_account`
-       - optional: storage_bucket
-    2) Env fallback FIREBASE_SERVICE_ACCOUNT_JSON / FIREBASE_CREDENTIALS (if you use them)
+      1) Streamlit Secrets [firebase] (recommended)
+         - either field-by-field TOML or raw JSON under `service_account`
+         - optional: storage_bucket
+      2) Env fallback FIREBASE_SERVICE_ACCOUNT_JSON / FIREBASE_CREDENTIALS
+         - optional: FIREBASE_STORAGE_BUCKET
     Returns: (firestore_client, storage_bucket_or_None)
     """
     global firebase_admin
@@ -64,7 +67,7 @@ def _init_firebase():
             }
         bucket_name = str(fb.get("storage_bucket", "")).strip()
 
-    # (Optional) Env fallbacks if you use them locally
+    # (Optional) Env fallbacks if you use them locally/CI
     if sa is None:
         import os
         sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
@@ -79,11 +82,15 @@ def _init_firebase():
             )
         bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET", bucket_name) or ""
 
+    from firebase_admin import credentials as _credentials  # type: ignore
+    from firebase_admin import firestore as _firestore      # type: ignore
+    from firebase_admin import storage as _storage          # type: ignore
+
     cred = _credentials.Certificate(sa)
     project_id = sa.get("project_id", "")
 
     if not firebase_admin._apps:  # type: ignore
-        opts = {}
+        opts: Dict[str, str] = {}
         if bucket_name:
             opts["storageBucket"] = bucket_name
         if project_id:
@@ -100,66 +107,9 @@ def get_db_and_bucket():
     return _init_firebase()
 
 
-def upload_bytes(path_in_bucket: str, file_bytes: bytes, content_type: str | None = None) -> str:
-    """
-    Uploads bytes to Firebase Storage (if bucket configured).
-    Returns a public URL if the blob is made public; otherwise the gs:// URL.
-    """
-    db, bucket = get_db_and_bucket()
-    if bucket is None:
-        raise RuntimeError("Firebase Storage bucket not configured. Set storage_bucket in [firebase] secrets.")
+# ---------- Firestore <-> pandas utilities ----------
 
-    blob = bucket.blob(path_in_bucket)
-    blob.upload_from_string(file_bytes, content_type=content_type)
-
-    # make it public so avatars can render without signed URLs
-    try:
-        blob.make_public()
-        return blob.public_url
-    except Exception:
-        return f"gs://{bucket.name}/{path_in_bucket}"
-
-
-def delete_blob(path_in_bucket: str) -> None:
-    """Deletes a blob from Storage; no-op if it doesn't exist."""
-    _, bucket = get_db_and_bucket()
-    if bucket is None:
-        return
-    blob = bucket.blob(path_in_bucket)
-    try:
-        blob.delete()
-=======
-import io, json
-from typing import List, Dict, Any, Optional
-import pandas as pd
-import streamlit as st
-
-from firebase_admin import credentials, firestore, initialize_app, storage as fb_storage
-from google.cloud import storage as gcs
-
-# ---------- bootstrap ----------
-@st.cache_resource(show_spinner=False)
-def _init_firebase():
-    # read from Streamlit secrets
-    cfg = st.secrets.get("FIREBASE", {})
-    project_id = cfg.get("project_id")
-    sa_json_str = cfg.get("service_account_json", "")
-    bucket_name = cfg.get("storage_bucket")
-
-    if not project_id or not sa_json_str or not bucket_name:
-        raise RuntimeError("Missing FIREBASE settings in .streamlit/secrets.toml")
-
-    cred = credentials.Certificate(json.loads(sa_json_str))
-    app = initialize_app(cred, {"storageBucket": bucket_name})
-    db = firestore.client()
-    bucket = fb_storage.bucket()  # default = bucket_name above
-    return db, bucket
-
-def get_db_and_bucket():
-    return _init_firebase()
-
-# ---------- Firestore <-> pandas ----------
-def df_from_collection(collection: str, where: Optional[List]=None) -> pd.DataFrame:
+def df_from_collection(collection: str, where: Optional[List[tuple]] = None) -> pd.DataFrame:
     """
     Load a whole collection (optionally with simple where filters).
     where = [("field", "==", value), ...]
@@ -172,32 +122,39 @@ def df_from_collection(collection: str, where: Optional[List]=None) -> pd.DataFr
     docs = q.stream()
     rows = []
     for d in docs:
-        r = d.to_dict()
-        r["id"] = d.id if "id" not in r else r["id"]
+        r = d.to_dict() or {}
+        r["id"] = r.get("id", d.id)
         rows.append(r)
     return pd.DataFrame(rows) if rows else pd.DataFrame()
+
 
 def upsert_dataframe(collection: str, df: pd.DataFrame, id_field: str = "id") -> None:
     """
     Upsert each row in df into Firestore collection by id_field.
+    None/NaN are written as nulls. If id is missing/blank, a new doc is added.
     """
     db, _ = get_db_and_bucket()
     for _, row in df.iterrows():
-        data = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
-        doc_id = str(data.get(id_field) or "")
+        data = {k: (None if (isinstance(v, float) and pd.isna(v)) else v) for k, v in row.to_dict().items()}
+        doc_id = str(data.get(id_field) or "").strip()
         if not doc_id:
-            # fall back: Firestore auto id
             db.collection(collection).add(data)
         else:
             db.collection(collection).document(doc_id).set(data, merge=True)
 
-def delete_by_ids(collection: str, ids: List[str], id_field: str = "id") -> None:
+
+def delete_by_ids(collection: str, ids: List[str]) -> None:
     db, _ = get_db_and_bucket()
     for doc_id in ids:
-        db.collection(collection).document(str(doc_id)).delete()
+        try:
+            db.collection(collection).document(str(doc_id)).delete()
+        except Exception:
+            pass
 
-# ---------- settings ----------
-SETTINGS_DOC = ("settings", "app_settings")
+
+# ---------- app settings helpers ----------
+
+SETTINGS_DOC = ("app_settings", "default")
 
 def load_settings_dict(defaults: dict) -> dict:
     db, _ = get_db_and_bucket()
@@ -208,24 +165,40 @@ def load_settings_dict(defaults: dict) -> dict:
     out.update(data or {})
     return out
 
+
 def save_settings_dict(s: dict) -> None:
     db, _ = get_db_and_bucket()
     ref = db.collection(SETTINGS_DOC[0]).document(SETTINGS_DOC[1])
-    ref.set(s, merge=True)
+    ref.set(dict(s), merge=True)
 
-# ---------- storage (avatars, backgrounds) ----------
-def upload_bytes(path_in_bucket: str, content: bytes, content_type: str = "application/octet-stream") -> str:
+
+# ---------- Firebase Storage helpers ----------
+
+def upload_bytes(path_in_bucket: str, file_bytes: bytes, content_type: str | None = None) -> str:
     """
-    Upload bytes to Firebase Storage and return the gs:// URL.
+    Uploads bytes to Firebase Storage (if bucket configured).
+    Returns a public URL if the blob is made public; otherwise the gs:// URL.
     """
     _, bucket = get_db_and_bucket()
+    if bucket is None:
+        raise RuntimeError("Firebase Storage bucket not configured. Set storage_bucket in [firebase] secrets.")
+
     blob = bucket.blob(path_in_bucket)
-    blob.upload_from_string(content, content_type=content_type)
-    # You can also generate a signed URL if you want a public HTTP URL
-    return f"gs://{bucket.name}/{path_in_bucket}"
+    blob.upload_from_string(file_bytes, content_type=content_type)
+
+    # Try to make it public so the URL can render in the UI without signed URLs
+    try:
+        blob.make_public()
+        return blob.public_url
+    except Exception:
+        return f"gs://{bucket.name}/{path_in_bucket}"
+
 
 def delete_blob(path_in_bucket: str) -> None:
+    """Deletes a blob from Storage; no-op if it doesn't exist or bucket missing."""
     _, bucket = get_db_and_bucket()
+    if bucket is None:
+        return
     try:
         bucket.blob(path_in_bucket).delete()
     except Exception:

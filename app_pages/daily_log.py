@@ -14,6 +14,21 @@ from core.utils import add_delete_flag, ensure_string_cols, ensure_numeric, coer
 def render(subjects_df, logs_df, logs_df_all):
     st.title("Daily Log")
 
+    # ----- Active vs Completed subjects -----
+    has_completed_col = "completed" in subjects_df.columns
+    active_subjects = subjects_df[subjects_df["completed"] != True] if has_completed_col else subjects_df.copy()
+    completed_subjects = subjects_df[subjects_df["completed"] == True] if has_completed_col else subjects_df.iloc[0:0]
+
+    # Toggle to include completed subjects in the adder (off by default)
+    include_completed = False
+    if has_completed_col and len(completed_subjects):
+        include_completed = st.toggle("Show completed subjects in picker", value=False, help="Completed subjects are hidden by default.")
+
+    # Build subject name -> id map for the add form
+    picker_df = subjects_df if include_completed else active_subjects
+    subj_opts = {row["name"]: row["id"] for _, row in picker_df.iterrows()}
+    no_subjects_msg = "— no subjects —" if len(subj_opts) == 0 else None
+
     # --- Add form ---
     with st.form("add_log"):
         c1, c2, c3 = st.columns(3)
@@ -21,8 +36,7 @@ def render(subjects_df, logs_df, logs_df_all):
             # ensure clean date (no time); always store as ISO string later
             log_date = pd.to_datetime(st.date_input("Date", value=pd.Timestamp.today().date())).date()
         with c2:
-            subj_opts = {row["name"]: row["id"] for _, row in subjects_df.iterrows()}
-            subj_name = st.selectbox("Subject", list(subj_opts.keys()) or ["— no subjects —"])
+            subj_name = st.selectbox("Subject", list(subj_opts.keys()) or [no_subjects_msg])
             subj_id = subj_opts.get(subj_name, "")
         with c3:
             hours = st.number_input("Hours", min_value=0.0, step=0.25, value=1.5)
@@ -39,6 +53,8 @@ def render(subjects_df, logs_df, logs_df_all):
         if submitted:
             if not st.session_state.user:
                 st.warning("Please sign in to add logs.")
+            elif not subj_id:
+                st.warning("Please add a subject first.")
             else:
                 new_row = {
                     "id": str(uuid.uuid4()),
@@ -59,7 +75,6 @@ def render(subjects_df, logs_df, logs_df_all):
                 else:
                     updated = row_df
 
-
                 # 🔒 normalize date BEFORE saving (handles legacy/mixed rows too)
                 updated["date"] = pd.to_datetime(updated["date"], errors="coerce").dt.strftime("%Y-%m-%d")
 
@@ -75,14 +90,24 @@ def render(subjects_df, logs_df, logs_df_all):
     editable = ensure_string_cols(editable, ["subject_id", "task", "notes"])
     editable = ensure_numeric(editable, ["hours", "score"])
 
-    subject_ids = subjects_df["id"].tolist() if len(subjects_df) else []
+    # Subject options for the editor:
+    # keep all ACTIVE subject ids, PLUS any ids already present in the logs (so old rows remain valid)
+    active_ids = set(active_subjects["id"].astype(str).tolist())
+    present_ids = set(editable["subject_id"].dropna().astype(str).tolist())
+    editor_subject_ids = sorted(active_ids.union(present_ids))
+
+    if has_completed_col:
+        st.caption(
+            f"Active subjects shown in pickers. Completed hidden by default. "
+            f"(Active: {len(active_subjects)} | Completed: {len(completed_subjects)})"
+        )
 
     edited_view = st.data_editor(
         editable,
         column_config={
             "id": st.column_config.TextColumn(help="Unique log ID", disabled=True),
             "date": st.column_config.DateColumn(format="YYYY-MM-DD"),
-            "subject_id": st.column_config.SelectboxColumn(label="Subject", options=subject_ids),
+            "subject_id": st.column_config.SelectboxColumn(label="Subject", options=editor_subject_ids),
             "hours": st.column_config.NumberColumn(step=0.25, min_value=0.0),
             "task": st.column_config.SelectboxColumn(options=TASK_TYPES),
             "score": st.column_config.NumberColumn(min_value=0, max_value=100, step=1),
