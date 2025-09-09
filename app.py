@@ -328,15 +328,16 @@ if st.session_state.user is None:
         tab_login, tab_signup = st.tabs(["Login", "Sign up"])
 
         with tab_login:
-            # Quick pick for remembered user (does not auto-login)
+        # Quick pick for remembered user (does not auto-login)
             if remembered_user:
-                st.markdown(
-                    f"**Quick pick:** {remembered_user}  "
-                    f"<span class='tiny'>(stored on this device)</span>", unsafe_allow_html=True
-                )
-                st.write("")
+             st.markdown(
+                f"**Quick pick:** {remembered_user}  "
+                f"<span class='tiny'>(stored on this device)</span>", unsafe_allow_html=True
+            )
+            st.write("")
 
-            # Preselect remembered user if present
+        # 🔒 Wrap the inputs in a form so ENTER submits
+        with st.form("login_form", clear_on_submit=False):
             sel_user = st.selectbox(
                 "User",
                 ["— select —"] + usernames,
@@ -349,56 +350,41 @@ if st.session_state.user is None:
             with c1:
                 remember_me = st.checkbox("Remember me", value=bool(remembered_user))
             with c2:
-                st.markdown("<div class='tiny' style='text-align:right'>Press <kbd>Enter</kbd> to submit</div>", unsafe_allow_html=True)
+                st.markdown(
+                    "<div class='tiny' style='text-align:right'>Press <kbd>Enter</kbd> to sign in</div>",
+                    unsafe_allow_html=True,
+                )
 
-            if st.button("Sign in", type="primary", use_container_width=True):
-                if sel_user == "— select —":
-                    st.error("Pick a user.")
+            # ⏎ This button is triggered by pressing ENTER inside the form
+            submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
+
+        if submitted:
+            if sel_user == "— select —":
+                st.error("Pick a user.")
+            else:
+                row = get_user_by_name(sel_user)
+                if row is None:
+                    st.error("User not found.")
                 else:
-                    row = get_user_by_name(sel_user)
-                    if row is None:
-                        st.error("User not found.")
-                    else:
-                        if _verify_password(pw, str(row.get("password_hash", ""))):
-                            # Persist 'remember me' in settings.json
-                            settings_live = load_settings()
-                            if remember_me:
-                                settings_live["remembered_user"] = sel_user
-                            else:
-                                settings_live.pop("remembered_user", None)
-                            from core.storage import save_settings  # local import to avoid top clutter
-                            save_settings(settings_live)
-
-                            st.session_state.user = {"id": row["id"], "username": row["username"]}
-                            claim_legacy_rows_for_user(row["id"])
-                            st.success(f"Signed in as {row['username']}")
-                            st.rerun()
-                        else:
-                            st.error("Wrong password.")
-            st.markdown("<div class='tiny muted'>We never store your password in the browser.</div>", unsafe_allow_html=True)
-
-        with tab_signup:
-            new_user = st.text_input("New username", key="signup_user", placeholder="e.g. Aisha, Victor, Team-Lab-3")
-            new_pw = st.text_input("Password (optional)", type="password", key="signup_pw")
-            if st.button("Create account", use_container_width=True):
-                if not new_user.strip():
-                    st.error("Enter a username.")
-                elif get_user_by_name(new_user) is not None:
-                    st.error("Username already exists.")
-                else:
-                    uid = create_user(new_user.strip(), new_pw.strip())
-                    if uid:
-                        # also remember this freshly created user for convenience
+                    if _verify_password(pw, str(row.get("password_hash", ""))):
+                        # Persist 'remember me' in settings.json
                         settings_live = load_settings()
-                        settings_live["remembered_user"] = new_user.strip()
+                        if remember_me:
+                            settings_live["remembered_user"] = sel_user
+                        else:
+                            settings_live.pop("remembered_user", None)
                         from core.storage import save_settings
                         save_settings(settings_live)
 
-                        st.session_state.user = {"id": uid, "username": new_user.strip()}
-                        st.success(f"Account created. Welcome, {new_user.strip()}!")
+                        st.session_state.user = {"id": row["id"], "username": row["username"]}
+                        claim_legacy_rows_for_user(row["id"])
+                        st.success(f"Signed in as {row['username']}")
                         st.rerun()
                     else:
-                        st.error("Could not create user.")
+                        st.error("Wrong password.")
+
+        st.markdown("<div class='tiny muted'>We never store your password in the browser.</div>", unsafe_allow_html=True)
+
 
     st.divider()
     st.caption("Need to import existing data? Use **Settings/Backup** after signing in.")
