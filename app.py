@@ -1,472 +1,322 @@
-# app.py
 from __future__ import annotations
-import sys, os, json, random
+
+import os
+import sys
+import json
+import random
+import tempfile
 from pathlib import Path
 
-# Ensure project root on path (so "core.*" and "app_pages.*" import cleanly)
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-import pandas as pd
 import streamlit as st
+import pandas as pd
 
-# ==============================
-# Bootstrap Firebase (prod-safe)
-# ==============================
-def _bootstrap_firebase_env_from_secrets():
+# ============================================================
+# Ensure project root is on PYTHONPATH
+# ============================================================
+PROJECT_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+# ============================================================
+# Firebase bootstrap (MANDATORY, FAIL-FAST)
+# ============================================================
+def bootstrap_firebase_or_die() -> None:
     """
-    If FIREBASE env vars aren't set, populate them from st.secrets["FIREBASE"].
-    This lets core.storage connect to Firestore/Storage in production.
+    Enforce Firebase availability.
+    - Reads credentials ONLY from st.secrets
+    - Writes service account JSON to /tmp
+    - Sets required env vars
+    - Stops app immediately if anything is missing
     """
     try:
-        cfg = st.secrets.get("FIREBASE", {})
+        cfg = st.secrets["FIREBASE"]
     except Exception:
-        cfg = {}
+        st.error("❌ FIREBASE secrets not found. Deployment is misconfigured.")
+        st.stop()
 
-    if not cfg:
-        return
+    # ---- Service account JSON ----
+    sa = cfg.get("service_account_json")
+    if not sa:
+        st.error("❌ FIREBASE.service_account_json is missing.")
+        st.stop()
 
-    # Materialize service account JSON to a temp file
-    sa_raw = cfg.get("service_account_json", "")
-    if sa_raw:
-        p = Path("/tmp/firebase_sa.json")
-        try:
-            if isinstance(sa_raw, dict):
-                p.write_text(json.dumps(sa_raw), encoding="utf-8")
-            else:
-                p.write_text(sa_raw, encoding="utf-8")
-            os.environ.setdefault("FIREBASE_CREDENTIALS", str(p))
-        except Exception:
-            pass
+    sa_path = Path(tempfile.gettempdir()) / "firebase_service_account.json"
+    try:
+        if isinstance(sa, dict):
+            sa_path.write_text(json.dumps(sa), encoding="utf-8")
+        else:
+            sa_path.write_text(sa, encoding="utf-8")
+    except Exception as e:
+        st.error(f"❌ Failed to materialize Firebase credentials: {e}")
+        st.stop()
 
-    if cfg.get("project_id"):
-        os.environ.setdefault("FIREBASE_PROJECT_ID", str(cfg["project_id"]))
-    if cfg.get("storage_bucket"):
-        os.environ.setdefault("FIREBASE_STORAGE_BUCKET", str(cfg["storage_bucket"]))
-    # Prefer ON in prod unless explicitly disabled
-    os.environ.setdefault("USE_FIREBASE", "1")
+    os.environ["FIREBASE_CREDENTIALS"] = str(sa_path)
 
-_bootstrap_firebase_env_from_secrets()
+    # ---- Required metadata ----
+    project_id = cfg.get("project_id")
+    bucket = cfg.get("storage_bucket")
 
-# ---------- Pages ----------
+    if not project_id:
+        st.error("❌ FIREBASE.project_id is missing.")
+        st.stop()
+    if not bucket:
+        st.error("❌ FIREBASE.storage_bucket is missing.")
+        st.stop()
+
+    os.environ["FIREBASE_PROJECT_ID"] = project_id
+    os.environ["FIREBASE_STORAGE_BUCKET"] = bucket
+    os.environ["USE_FIREBASE"] = "1"
+
+
+# 🔒 MUST run before importing core.storage
+bootstrap_firebase_or_die()
+
+
+# ============================================================
+# Core imports (Firebase already guaranteed)
+# ============================================================
+from core.config import SUBJECTS_CSV, LOGS_CSV, TESTS_CSV
+from core.storage import (
+    load_df,
+    save_df,
+    load_settings,
+    save_settings,
+)
+
+from core.auth import (
+    load_users,
+    get_user_by_name,
+    create_user,
+    _verify_password,
+    claim_legacy_rows_for_user,
+    get_user_avatar_path,
+    set_user_avatar,
+)
+from core.gamify import compute_leaderboard
+
+
+# ============================================================
+# App pages
+# ============================================================
 import app_pages.dashboard as dashboard
 import app_pages.subjects as subjects
 import app_pages.daily_log as daily_log
 import app_pages.self_tests as self_tests
 import app_pages.settings_backup as settings_backup
-# import app_pages.leaderboard as leaderboard  # optional
 
-# Optional diagnostics page (use if present)
 try:
-    import app_pages.firebase_check as firebase_check  # your layout
+    import app_pages.firebase_check as firebase_check
 except Exception:
     firebase_check = None
 
-# ---------- Core ----------
-from core.config import SUBJECTS_CSV, LOGS_CSV, TESTS_CSV
-from core.storage import ensure_store, load_df, load_settings, save_df
-from core.auth import (
-    load_users, get_user_by_name, create_user,
-    _verify_password, claim_legacy_rows_for_user,
-    get_user_avatar_path, set_user_avatar,
-)
-from core.gamify import compute_leaderboard
 
-# ==============================
-# Base page config
-# ==============================
+# ============================================================
+# Page config
+# ============================================================
 st.set_page_config(
     page_title="Nierwell GPA System",
     page_icon="assets/logo.png",
     layout="wide",
 )
 
-# Small CSS helper for a clean, techy look (dark, subtle neon accents)
-def inject_base_css(bg_path: str = ""):
-    # Normalize Windows paths for CSS (NO backslashes inside f-strings)
-    css_path = bg_path.replace("\\", "/") if bg_path else ""
 
-    bg_css = (
-        f'url("file:///{css_path}"), radial-gradient(80% 120% at 100% 0%, #0f172a 10%, #0b1022 70%)'
-        if css_path
-        else
-        'radial-gradient(80% 120% at 100% 0%, #0f172a 10%, #0b1022 70%)'
+# ============================================================
+# Global CSS
+# ============================================================
+def inject_base_css(bg_path: str = "") -> None:
+    bg_css = bg_path.replace("\\", "/") if bg_path else ""
+
+    bg = (
+        f'url("file:///{bg_css}"), radial-gradient(80% 120% at 100% 0%, #0f172a 10%, #0b1022 70%)'
+        if bg_css
+        else "radial-gradient(80% 120% at 100% 0%, #0f172a 10%, #0b1022 70%)"
     )
 
     st.markdown(
         f"""
         <style>
-            :root {{
-                --nw-bg: #0b1022;
-                --nw-card: rgba(255,255,255,0.04);
-                --nw-card-border: rgba(255,255,255,0.10);
-                --nw-fg: #d8e1ff;
-                --nw-dim: #a7b0d8;
-                --nw-accent: #5eead4;
-                --nw-accent-2: #7c3aed;
-            }}
-
-            .stApp {{
-                background-image: {bg_css};
-                background-size: cover;
-                background-position: center;
-                background-attachment: fixed;
-                color: var(--nw-fg);
-            }}
-
-            .block-container {{
-                padding-top: 2.2rem;
-            }}
-
-            h1 {{
-                font-weight: 700;
-                background: linear-gradient(90deg, var(--nw-accent), var(--nw-accent-2));
-                -webkit-background-clip: text;
-                background-clip: text;
-                color: transparent;
-            }}
-
-            footer {{ visibility: hidden; }}
+        :root {{
+            --fg: #d8e1ff;
+            --accent: #5eead4;
+            --accent2: #7c3aed;
+        }}
+        .stApp {{
+            background-image: {bg};
+            background-size: cover;
+            background-attachment: fixed;
+            color: var(--fg);
+        }}
+        h1 {{
+            font-weight: 700;
+            background: linear-gradient(90deg, var(--accent), var(--accent2));
+            -webkit-background-clip: text;
+            color: transparent;
+        }}
+        footer {{ visibility: hidden; }}
         </style>
         """,
         unsafe_allow_html=True,
     )
-# ==============================
+
+
+# ============================================================
 # App bootstrap
-# ==============================
-ensure_store()
-settings = load_settings() or {}
+# ============================================================
+
+try:
+    settings = load_settings() or {}
+except Exception as e:
+    st.error(f"❌ Firebase storage unavailable: {e}")
+    st.stop()
+
+inject_base_css(settings.get("welcome_bg_path", ""))
 
 if "user" not in st.session_state:
     st.session_state.user = None
 if "nav" not in st.session_state:
     st.session_state.nav = "Dashboard"
 
-# Global CSS (background may be overridden on welcome with branding)
-inject_base_css(settings.get("welcome_bg_path", ""))
 
-# ==============================
-# WELCOME / AUTH (not signed in)
-# ==============================
+# ============================================================
+# AUTH / WELCOME
+# ============================================================
 if st.session_state.user is None:
-    bg_path = str(settings.get("welcome_bg_path", "")).strip()
+    st.title("Nierwell GPA Manager")
+    st.caption("Walk into exams prepared.")
 
-    # Techy gradient + glass card (no layout changes)
-    st.markdown(
-        """
-        <style>
-        .stApp {
-            background: radial-gradient(1200px 600px at 15% -10%, #0ea5e922, transparent 60%),
-                        radial-gradient(1000px 500px at 120% 0%, #22d3ee22, transparent 60%),
-                        linear-gradient(180deg, #0b1020 0%, #0e1117 100%);
-            color: #e6e8ec;
-        }
-        .app-hero h1, .app-hero p { color: #e6e8ec !important; }
-        .glass {
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.12);
-            backdrop-filter: blur(8px);
-            -webkit-backdrop-filter: blur(8px);
-            border-radius: 16px;
-            padding: 24px 20px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.25);
-        }
-        /* tighten right column content width slightly */
-        section[data-testid="stSidebar"] + div [data-testid="column"]:last-child > div:has(> .glass) {
-            max-width: 520px;
-            margin-left: auto;
-        }
-        .muted {{ color: #9aa4b2 !important; }}
-        .tip  {{ color: #a0f0ff !important; font-size: 0.9rem; }}
-        .tiny {{ font-size: 0.85rem; color: #93a0ad; }}
-        .spacer-8 {{ height: 8px; }}
-        .spacer-16 {{ height: 16px; }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    users_df = load_users()
+    usernames = users_df["username"].tolist()
 
-    # Optional center graphic (user-configurable)
-    if bg_path:
-        css_bg = bg_path.replace("\\", "/")
-        st.markdown(
-            f"""
-            <style>
-            .stApp {{
-                background-image: url("file:///{css_bg}"),
-                                  radial-gradient(1200px 600px at 15% -10%, #0ea5e922, transparent 60%),
-                                  radial-gradient(1000px 500px at 120% 0%, #22d3ee22, transparent 60%),
-                                  linear-gradient(180deg, #0b1020 0%, #0e1117 100%);
-                background-repeat: no-repeat, no-repeat, no-repeat, no-repeat;
-                background-position: center top 80px, left top, right top, center;
-                background-size: 420px auto, auto, auto, auto;
-            }}
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
+    tab_login, tab_signup = st.tabs(["Login", "Sign up"])
 
-    users_df_all = load_users()
-    usernames = users_df_all["username"].tolist()
-
-    # Read any remembered user from settings (preselect if present)
-    remembered_user = str(settings.get("remembered_user", "")).strip()
-    remembered_idx = (["— select —"] + usernames).index(remembered_user) if remembered_user in usernames else 0
-
-    left, right = st.columns([7, 5], gap="large")
-
-    # ---------- Left: marketing / features ----------
-    with left:
-        st.markdown('<div class="app-hero">', unsafe_allow_html=True)
-        st.title("Nierwell GPA Manager")
-        st.caption("Walk into exams prepared.")
-        st.subheader("What you can do")
-        f1, f2, f3 = st.columns(3)
-        with f1:
-            st.markdown("### 📚 Subjects")
-            st.write("Organize courses, set exam dates, track confidence.")
-        with f2:
-            st.markdown("### 📝 Daily Log")
-            st.write("Record hours, task types, and quick self-ratings.")
-        with f3:
-            st.markdown("### 🧪 Self-Tests")
-            st.write("Add scores & difficulty; watch your curve improve.")
-        st.markdown(
-            '<div class="spacer-16"></div><span class="tip">Pro tip:</span> '
-            '<span class="muted">Create your subjects first; everything else unlocks from there.</span>',
-            unsafe_allow_html=True,
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        # ---------- Restore (ALL users) block lives INSIDE the welcome screen ----------
-        from core.storage import restore_from_zip_all_users, SUBJECTS_CSV, LOGS_CSV, TESTS_CSV, USERS_CSV
-        with st.expander("🔧 Restore data from backup (all users)"):
-            st.caption("Upload a ZIP created by the app’s Backup page. This restores subjects, logs, tests, users, and optionally settings for **all** users.")
-            mode = st.radio("Restore mode", ["Merge (safe, default)", "Replace ALL (danger)"], horizontal=True, index=0)
-            up = st.file_uploader("Backup ZIP", type=["zip"], accept_multiple_files=False, key="welcome_restore_zip")
-            col1, col2 = st.columns([1,1])
-            with col1:
-                if st.button("Run restore", type="primary", use_container_width=True, disabled=up is None):
-                    if up is None:
-                        st.warning("Please choose a ZIP.")
-                    else:
-                        rep = restore_from_zip_all_users(up.read(), mode=("merge" if mode.startswith("Merge") else "replace_all"))
-                        st.success("Restore complete.")
-                        st.json(rep)  # or render a compact summary
-                        st.toast("Data restored. You can now sign in.", icon="✅")
-                        # Force fresh reads for load_users(), load_df(), etc.
-                        st.cache_data.clear()
-                        st.rerun()
-            with col2:
-                st.caption("CSV files used by the app:")
-                st.code(f"{SUBJECTS_CSV}\n{LOGS_CSV}\n{TESTS_CSV}\n{USERS_CSV}")
-
-    # ---------- Right: auth ----------
-    with right:
-        st.subheader("Sign in")
-        tab_login, tab_signup = st.tabs(["Login", "Sign up"])
-
-        with tab_login:
-        # Quick pick for remembered user (does not auto-login)
-            if remembered_user:
-             st.markdown(
-                f"**Quick pick:** {remembered_user}  "
-                f"<span class='tiny'>(stored on this device)</span>", unsafe_allow_html=True
-            )
-            st.write("")
-
-        # 🔒 Wrap the inputs in a form so ENTER submits
-        with st.form("login_form", clear_on_submit=False):
-            sel_user = st.selectbox(
-                "User",
-                ["— select —"] + usernames,
-                index=remembered_idx,
-                key="login_user_sel",
-            )
-            pw = st.text_input("Password", type="password", key="login_pw", placeholder="Leave empty if none")
-
-            c1, c2 = st.columns([1, 1])
-            with c1:
-                remember_me = st.checkbox("Remember me", value=bool(remembered_user))
-            with c2:
-                st.markdown(
-                    "<div class='tiny' style='text-align:right'>Press <kbd>Enter</kbd> to sign in</div>",
-                    unsafe_allow_html=True,
-                )
-
-            # ⏎ This button is triggered by pressing ENTER inside the form
-            submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
+    with tab_login:
+        with st.form("login_form"):
+            sel_user = st.selectbox("User", ["— select —"] + usernames)
+            pw = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Sign in", type="primary")
 
         if submitted:
             if sel_user == "— select —":
                 st.error("Pick a user.")
             else:
                 row = get_user_by_name(sel_user)
-                if row is None:
-                    st.error("User not found.")
+                if row and _verify_password(pw, str(row.get("password_hash", ""))):
+                    st.session_state.user = {
+                        "id": row["id"],
+                        "username": row["username"],
+                    }
+                    claim_legacy_rows_for_user(row["id"])
+                    st.success("Signed in.")
+                    st.rerun()
                 else:
-                    if _verify_password(pw, str(row.get("password_hash", ""))):
-                        # Persist 'remember me' in settings.json
-                        settings_live = load_settings()
-                        if remember_me:
-                            settings_live["remembered_user"] = sel_user
-                        else:
-                            settings_live.pop("remembered_user", None)
-                        from core.storage import save_settings
-                        save_settings(settings_live)
+                    st.error("Invalid credentials.")
 
-                        st.session_state.user = {"id": row["id"], "username": row["username"]}
-                        claim_legacy_rows_for_user(row["id"])
-                        st.success(f"Signed in as {row['username']}")
-                        st.rerun()
-                    else:
-                        st.error("Wrong password.")
+    with tab_signup:
+        with st.form("signup_form"):
+            uname = st.text_input("Username")
+            pw = st.text_input("Password", type="password")
+            create = st.form_submit_button("Create account")
 
-        st.markdown("<div class='tiny muted'>We never store your password in the browser.</div>", unsafe_allow_html=True)
+        if create:
+            if not uname:
+                st.error("Username required.")
+            else:
+                create_user(uname, pw)
+                st.success("Account created. You may now sign in.")
+                st.rerun()
 
-
-    st.divider()
-    st.caption("Need to import existing data? Use **Settings/Backup** after signing in.")
     st.stop()
 
-# ==============================
+
+# ============================================================
 # SIGNED-IN APP
-# ==============================
-if st.session_state.get("user"):
-    username = st.session_state.user.get("username", "Student")
-    st.markdown(f"## 👋 Welcome, **{username}**")
+# ============================================================
+uid = st.session_state.user["id"]
+username = st.session_state.user["username"]
 
-    ironman_quotes = [
-        "“I am Iron Man.”",
-        "“Genius, billionaire, playboy, philanthropist.”",
-        "“Sometimes you gotta run before you can walk.”",
-        "“If we can’t protect the Earth, you can be damn sure we’ll avenge it.”",
-        "“I shouldn’t be alive, unless it was for a reason.”",
-        "“It’s not about how much we lost, it’s about how much we have left.”",
-        "“Sometimes you have to learn to run before you can walk.”"
-    ]
-    st.caption(f"💬 *{random.choice(ironman_quotes)}*")
+st.markdown(f"## 👋 Welcome, **{username}**")
 
-# Sidebar — account + nav
+quotes = [
+    "Sometimes you gotta run before you can walk.",
+    "Focus. Build. Execute.",
+    "Discipline beats motivation.",
+]
+st.caption(f"💬 *{random.choice(quotes)}*")
+
+
+# ============================================================
+# Sidebar
+# ============================================================
 with st.sidebar:
-    st.markdown("Account")
-    st.write(f"**{st.session_state.user['username']}**")
+    st.markdown("### Account")
+    st.write(f"**{username}**")
 
-    avatar_path = get_user_avatar_path(st.session_state.user["id"])
-    if avatar_path and Path(avatar_path).exists():
-        st.image(avatar_path, width=96, caption="Profile")
-    else:
-        st.caption("No profile picture")
+    avatar = get_user_avatar_path(uid)
+    if avatar and Path(avatar).exists():
+        st.image(avatar, width=96)
 
-    up = st.file_uploader("Update avatar", type=["png","jpg","jpeg","webp"], key="avatar_up")
-    if up is not None:
-        set_user_avatar(st.session_state.user["id"], up.read(), up.name)
-        st.success("Profile updated."); st.rerun()
+    up = st.file_uploader("Update avatar", type=["png", "jpg", "jpeg", "webp"])
+    if up:
+        set_user_avatar(uid, up.read(), up.name)
+        st.success("Updated.")
+        st.rerun()
 
     st.divider()
-    nav_items = ["Dashboard", "Subjects", "Daily Log", "Self-Tests", "Settings & Backup", "🔍 Firebase Check"]
-    nav = st.radio(
+    nav_items = [
+        "Dashboard",
+        "Subjects",
+        "Daily Log",
+        "Self-Tests",
+        "Settings & Backup",
+        "🔍 Firebase Check",
+    ]
+    st.session_state.nav = st.radio(
         "Navigation",
         nav_items,
+        index=nav_items.index(st.session_state.nav),
         label_visibility="collapsed",
-        index=nav_items.index(st.session_state.nav) if st.session_state.nav in nav_items else 0,
     )
-    st.session_state.nav = nav
 
     st.divider()
     if st.button("Sign out", use_container_width=True):
         st.session_state.user = None
         st.rerun()
 
-# Load & filter data per-user
-subjects_df_all = load_df(SUBJECTS_CSV)
-logs_df_all     = load_df(LOGS_CSV)
-tests_df_all    = load_df(TESTS_CSV)
 
-for df in (logs_df_all, tests_df_all):
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.normalize()
+# ============================================================
+# Data loading
+# ============================================================
+subjects_all = load_df(SUBJECTS_CSV)
+logs_all = load_df(LOGS_CSV)
+tests_all = load_df(TESTS_CSV)
 
-uid = st.session_state.user["id"]
-subjects_df = subjects_df_all[subjects_df_all.get("user_id", "").astype(str) == uid].copy()
-logs_df     = logs_df_all[logs_df_all.get("user_id", "").astype(str) == uid].copy()
-tests_df    = tests_df_all[tests_df_all.get("user_id", "").astype(str) == uid].copy()
+subjects_df = subjects_all[subjects_all["user_id"] == uid]
+logs_df = logs_all[logs_all["user_id"] == uid]
+tests_df = tests_all[tests_all["user_id"] == uid]
 
-# Sidebar quick gamification (compact)
-try:
-    users_df_all = load_users()
-    lb = compute_leaderboard(logs_df_all, tests_df_all, users_df_all)
-    me = lb[lb["user_id"] == uid]
-    if not me.empty:
-        r = me.iloc[0]
-        st.sidebar.markdown("### 🏆 Score")
-        st.sidebar.metric("Rank", f"#{int(r['rank'])}/{len(lb)}")
-        st.sidebar.progress(
-            max(0, min(100, int(round(100 * float(r['score']) / (float(lb['score'].max()) or 1.0))))),
-            text=f"Score {int(r['score'])}"
-        )
-except Exception:
-    pass
 
-# Router with section header styling
-st.markdown("----")
+# ============================================================
+# Router
+# ============================================================
+st.markdown("---")
+
 if st.session_state.nav == "Dashboard":
-    st.markdown("## 📊 Dashboard")
     dashboard.render(subjects_df, logs_df, tests_df, settings)
 
 elif st.session_state.nav == "Subjects":
-    st.markdown("## 📚 Subjects")
-    subjects.render(subjects_df, subjects_df_all, logs_df, tests_df, settings)
+    subjects.render(subjects_df, subjects_all, logs_df, tests_df, settings)
 
 elif st.session_state.nav == "Daily Log":
-    st.markdown("## 📝 Daily Log")
-    daily_log.render(subjects_df, logs_df, logs_df_all)
+    daily_log.render(subjects_df, logs_df, logs_all)
 
 elif st.session_state.nav == "Self-Tests":
-    st.markdown("## 🧪 Self-Tests")
-    self_tests.render(subjects_df, tests_df, tests_df_all)
+    self_tests.render(subjects_df, tests_df, tests_all)
 
 elif st.session_state.nav == "Settings & Backup":
-    st.markdown("## ⚙️ Settings & Backup")
-    settings_backup.render(settings, subjects_df_all, logs_df_all, tests_df_all)
+    settings_backup.render(settings, subjects_all, logs_all, tests_all)
 
 else:
-    # 🔍 Firebase Check
     if firebase_check and hasattr(firebase_check, "render"):
         firebase_check.render()
     else:
-        # Built-in minimal checker exercising your normal save/load path
-        st.markdown("## 🔍 Firebase Check")
-        st.caption("This writes a tiny row to logs and immediately reads it back via your storage layer.")
-        from datetime import datetime
-        import uuid
-        if st.button("Write test row"):
-            try:
-                df_all = load_df(LOGS_CSV)
-                row = pd.DataFrame([{
-                    "id": str(uuid.uuid4()),
-                    "date": datetime.now().strftime("%Y-%m-%d"),
-                    "subject_id": "firebase-check",
-                    "hours": 0.1,
-                    "task": "check",
-                    "score": None,
-                    "notes": "Firebase test row",
-                    "user_id": st.session_state.user["id"],
-                }])
-                updated = pd.concat([df_all, row], ignore_index=True)
-                updated["date"] = pd.to_datetime(updated["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-                save_df(updated, LOGS_CSV)
-                st.success("✅ Wrote a test row. Reloading…")
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ Write failed: {e}")
-
-        try:
-            df = load_df(LOGS_CSV)
-            view = df.sort_values("date", ascending=False).head(12)
-            st.dataframe(view, use_container_width=True, hide_index=True)
-            if (view.get("subject_id") == "firebase-check").any():
-                st.success("Firestore/Storage path looks healthy — test row is visible.")
-            else:
-                st.info("No diagnostic row yet. Click “Write test row”.")
-        except Exception as e:
-            st.error(f"❌ Read failed: {e}")
+        st.info("Firebase diagnostics unavailable.")
