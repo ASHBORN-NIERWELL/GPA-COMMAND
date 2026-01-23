@@ -1,103 +1,110 @@
-# core/firebase_store.py
 from __future__ import annotations
-import io, json
-from typing import List, Dict, Any, Optional
+import json
+import os
+from pathlib import Path
+from typing import Optional, Tuple, List, Any, Dict
 import pandas as pd
 import streamlit as st
+from datetime import datetime
 
-from firebase_admin import credentials, firestore, initialize_app, storage as fb_storage
-from google.cloud import storage as gcs
+# Prevent re-initialization errors in Streamlit
+import firebase_admin
+from firebase_admin import credentials, firestore, storage
 
-# ---------- bootstrap ----------
-@st.cache_resource(show_spinner=False)
-def _init_firebase():
-    # read from Streamlit secrets
-    cfg = st.secrets.get("FIREBASE", {})
-    project_id = cfg.get("project_id")
-    sa_json_str = cfg.get("service_account_json", "")
-    bucket_name = cfg.get("storage_bucket")
+@st.cache_resource(show_spinner="Connecting to Firebase...")
+def _init_firebase() -> Tuple[Any, Any]:
+    """
+    Idempotent Firebase Admin init.
+    """
+    # 1. Check if already initialized
+    if not firebase_admin._apps:
+        sa: Optional[dict] = None
+        bucket_name = ""
 
-    if not project_id or not sa_json_str or not bucket_name:
-        raise RuntimeError("Missing FIREBASE settings in .streamlit/secrets.toml")
+        # 2. Try Streamlit Secrets
+        if "firebase" in st.secrets:
+            fb = st.secrets["firebase"]
+            # Support both raw JSON string or field-by-field
+            if "service_account_json" in fb:
+                sa = json.loads(fb["service_account_json"])
+            elif "project_id" in fb:
+                sa = dict(fb)
+                # Fix newline characters often broken in TOML
+                if "private_key" in sa:
+                    sa["private_key"] = sa["private_key"].replace("\\n", "\n")
+            
+            bucket_name = fb.get("storage_bucket", "")
 
-    cred = credentials.Certificate(json.loads(sa_json_str))
-    app = initialize_app(cred, {"storageBucket": bucket_name})
+        # 3. Fallback to Environment Variables
+        if sa is None:
+            sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+            if sa_json:
+                sa = json.loads(sa_json)
+        
+        if sa is None:
+            raise RuntimeError("No Firebase credentials found in st.secrets or Environment Variables.")
+
+        cred = credentials.Certificate(sa)
+        firebase_admin.initialize_app(cred, {
+            'storageBucket': bucket_name if bucket_name else None
+        })
+
     db = firestore.client()
-    bucket = fb_storage.bucket()  # default = bucket_name above
+    bucket = storage.bucket() if firebase_admin.get_app().options.get('storageBucket') else None
     return db, bucket
 
-def get_db_and_bucket():
-    return _init_firebase()
+def get_db():
+    db, _ = _init_firebase()
+    return db
 
-# ---------- Firestore <-> pandas ----------
-def df_from_collection(collection: str, where: Optional[List]=None) -> pd.DataFrame:
+# ---------- Analytical Utilities (The "New System" Logic) ----------
+
+def get_prioritized_subjects_df(user_id: str) -> pd.DataFrame:
     """
-    Load a whole collection (optionally with simple where filters).
-    where = [("field", "==", value), ...]
+    Fetches subjects and calculates Priority Score using Pandas for analysis.
     """
-    db, _ = get_db_and_bucket()
-    q = db.collection(collection)
-    if where:
-        for f, op, val in where:
-            q = q.where(f, op, val)
-    docs = q.stream()
+    db = get_db()
+    docs = db.collection(f"users/{user_id}/subjects").stream()
+    
     rows = []
+    now = datetime.now()
+
     for d in docs:
-        r = d.to_dict()
-        r["id"] = d.id if "id" not in r else r["id"]
-        rows.append(r)
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
+        data = d.to_dict()
+        data["id"] = d.id
+        
+        # Parse Dates
+        try:
+            # Handle ISO string from your previous Node.js project
+            exam_dt = datetime.fromisoformat(data['examDate'].replace('Z', '+00:00'))
+            days_left = (exam_dt.date() - now.date()).days
+        except (KeyError, ValueError):
+            days_left = 30 # Fallback
 
-def upsert_dataframe(collection: str, df: pd.DataFrame, id_field: str = "id") -> None:
+        # Analytical Formula
+        conf = data.get('confidence', 5)
+        credits = data.get('credits', 1)
+        
+        confidence_factor = 11 - conf
+        urgency_factor = 100 if days_left <= 0 else (30 / max(days_left, 1))
+        
+        data["priority_score"] = round(confidence_factor * credits * urgency_factor, 1)
+        data["days_left"] = days_left
+        rows.append(data)
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        return df.sort_values(by="priority_score", ascending=False)
+    return df
+
+def log_progress(user_id: str, subject_id: str, hours: float):
     """
-    Upsert each row in df into Firestore collection by id_field.
+    Python equivalent of your logStudySession Node.js action.
     """
-    db, _ = get_db_and_bucket()
-    for _, row in df.iterrows():
-        data = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
-        doc_id = str(data.get(id_field) or "")
-        if not doc_id:
-            # fall back: Firestore auto id
-            db.collection(collection).add(data)
-        else:
-            db.collection(collection).document(doc_id).set(data, merge=True)
-
-def delete_by_ids(collection: str, ids: List[str], id_field: str = "id") -> None:
-    db, _ = get_db_and_bucket()
-    for doc_id in ids:
-        db.collection(collection).document(str(doc_id)).delete()
-
-# ---------- settings ----------
-SETTINGS_DOC = ("settings", "app_settings")
-
-def load_settings_dict(defaults: dict) -> dict:
-    db, _ = get_db_and_bucket()
-    ref = db.collection(SETTINGS_DOC[0]).document(SETTINGS_DOC[1])
-    snap = ref.get()
-    data = snap.to_dict() if snap.exists else {}
-    out = defaults.copy()
-    out.update(data or {})
-    return out
-
-def save_settings_dict(s: dict) -> None:
-    db, _ = get_db_and_bucket()
-    ref = db.collection(SETTINGS_DOC[0]).document(SETTINGS_DOC[1])
-    ref.set(s, merge=True)
-
-# ---------- storage (avatars, backgrounds) ----------
-def upload_bytes(path_in_bucket: str, content: bytes, content_type: str = "application/octet-stream") -> str:
-    """
-    Upload bytes to Firebase Storage and return the gs:// URL.
-    """
-    _, bucket = get_db_and_bucket()
-    blob = bucket.blob(path_in_bucket)
-    blob.upload_from_string(content, content_type=content_type)
-    # You can also generate a signed URL if you want a public HTTP URL
-    return f"gs://{bucket.name}/{path_in_bucket}"
-
-def delete_blob(path_in_bucket: str) -> None:
-    _, bucket = get_db_and_bucket()
-    try:
-        bucket.blob(path_in_bucket).delete()
-    except Exception:
-        pass
+    db = get_db()
+    ref = db.collection(f"users/{user_id}/subjects").document(subject_id)
+    
+    ref.update({
+        "totalStudyHours": firestore.Increment(hours),
+        "lastStudied": datetime.now().isoformat()
+    })
