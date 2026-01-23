@@ -82,12 +82,16 @@ st.set_page_config(
 
 # Small CSS helper for a clean, techy look (dark, subtle neon accents)
 def inject_base_css(bg_path: str = ""):
-    # optional background from settings
+    # Normalize Windows paths for CSS (NO backslashes inside f-strings)
+    css_path = bg_path.replace("\\", "/") if bg_path else ""
+
     bg_css = (
-        f'url("file:///{bg_path.replace("\\\\","/")}"), radial-gradient(80% 120% at 100% 0%, #0f172a 10%, #0b1022 70%)'
-        if bg_path else
+        f'url("file:///{css_path}"), radial-gradient(80% 120% at 100% 0%, #0f172a 10%, #0b1022 70%)'
+        if css_path
+        else
         'radial-gradient(80% 120% at 100% 0%, #0f172a 10%, #0b1022 70%)'
     )
+
     st.markdown(
         f"""
         <style>
@@ -97,11 +101,10 @@ def inject_base_css(bg_path: str = ""):
                 --nw-card-border: rgba(255,255,255,0.10);
                 --nw-fg: #d8e1ff;
                 --nw-dim: #a7b0d8;
-                --nw-accent: #5eead4;   /* teal */
-                --nw-accent-2: #7c3aed; /* purple */
+                --nw-accent: #5eead4;
+                --nw-accent-2: #7c3aed;
             }}
 
-            /* App background (with optional image) */
             .stApp {{
                 background-image: {bg_css};
                 background-size: cover;
@@ -110,88 +113,23 @@ def inject_base_css(bg_path: str = ""):
                 color: var(--nw-fg);
             }}
 
-            /* Tighten content */
             .block-container {{
                 padding-top: 2.2rem;
             }}
 
-            /* Headings */
-            h1, h2, h3 {{
-                letter-spacing: 0.2px;
-            }}
             h1 {{
                 font-weight: 700;
                 background: linear-gradient(90deg, var(--nw-accent), var(--nw-accent-2));
                 -webkit-background-clip: text;
                 background-clip: text;
                 color: transparent;
-                margin-bottom: 0.25rem;
-            }}
-            .nw-subtle {{ color: var(--nw-dim); }}
-
-            /* Tech chips */
-            .nw-chip {{
-                display:inline-block; padding:7px 12px; margin:6px 8px 0 0;
-                border-radius:9999px; border:1px solid var(--nw-card-border);
-                background: var(--nw-card); font-size:.92rem;
             }}
 
-            /* Glass card */
-            .nw-card {{
-                border-radius: 18px;
-                border: 1px solid var(--nw-card-border);
-                background: var(--nw-card);
-                box-shadow: 0 20px 60px rgba(0,0,0,.35);
-                backdrop-filter: blur(10px);
-                -webkit-backdrop-filter: blur(10px);
-                padding: clamp(18px, 3.6vw, 28px);
-            }}
-
-            /* Logo top-right */
-            .nw-logo {{
-                position: fixed; top: 14px; right: 18px; z-index: 9999;
-                padding: 6px 8px; border-radius: 12px;
-                background: rgba(255,255,255,0.06);
-                border: 1px solid var(--nw-card-border);
-                backdrop-filter: blur(6px);
-            }}
-            .nw-logo img {{ height: 28px; }}
-
-            /* Buttons */
-            .stButton > button[kind="primary"] {{
-                border-radius: 12px !important;
-                background: linear-gradient(90deg, var(--nw-accent), var(--nw-accent-2)) !important;
-                color: #0b1022 !important; font-weight: 700 !important;
-                border: 0 !important;
-            }}
-            .stButton > button {{
-                border-radius: 12px !important;
-            }}
-
-            /* Inputs */
-            .stTextInput input, .stNumberInput input, .stDateInput input, .stSelectbox div[data-baseweb="select"] > div {{
-                border-radius: 12px !important;
-            }}
-
-            /* Sidebar style */
-            [data-testid="stSidebar"] > div:first-child {{
-                background: #0d1430;
-                border-right: 1px solid rgba(255,255,255,0.08);
-            }}
-
-            /* Hide default footer */
             footer {{ visibility: hidden; }}
-
-            /* Welcome screen: center layout */
-            .nw-center {{
-                min-height: calc(100vh - 120px);
-                display:flex; align-items:center; justify-content:center;
-            }}
         </style>
         """,
         unsafe_allow_html=True,
     )
-
 # ==============================
 # App bootstrap
 # ==============================

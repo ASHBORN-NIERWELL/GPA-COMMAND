@@ -1,205 +1,110 @@
-# core/firebase_store.py
 from __future__ import annotations
-
 import json
+import os
 from pathlib import Path
 from typing import Optional, Tuple, List, Any, Dict
-
 import pandas as pd
 import streamlit as st
+from datetime import datetime
 
-# Lazy (cached) bootstrap for Firebase Admin
-firebase_admin = None  # type: ignore
+# Prevent re-initialization errors in Streamlit
+import firebase_admin
+from firebase_admin import credentials, firestore, storage
 
-
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner="Connecting to Firebase...")
 def _init_firebase() -> Tuple[Any, Any]:
     """
-    Idempotent Firebase Admin init using:
-      1) Streamlit Secrets [firebase] (recommended)
-         - either field-by-field TOML or raw JSON under `service_account`
-         - optional: storage_bucket
-      2) Env fallback FIREBASE_SERVICE_ACCOUNT_JSON / FIREBASE_CREDENTIALS
-         - optional: FIREBASE_STORAGE_BUCKET
-    Returns: (firestore_client, storage_bucket_or_None)
+    Idempotent Firebase Admin init.
     """
-    global firebase_admin
-    try:
-        import firebase_admin  # type: ignore
-        from firebase_admin import credentials as _credentials  # type: ignore
-        from firebase_admin import firestore as _firestore  # type: ignore
-        from firebase_admin import storage as _storage  # type: ignore
-    except Exception as e:
-        raise RuntimeError(
-            "firebase_admin is not installed. Add to requirements.txt: firebase-admin"
-        ) from e
+    # 1. Check if already initialized
+    if not firebase_admin._apps:
+        sa: Optional[dict] = None
+        bucket_name = ""
 
-    # ---- Build service account from secrets (preferred) ----
-    sa: Optional[dict] = None
-    bucket_name = ""
-    if "firebase" in st.secrets:
-        fb = st.secrets["firebase"]
-        # Option B: raw JSON in a single key
-        if "service_account" in fb:
-            sa_raw = fb["service_account"]
-            sa = json.loads(sa_raw) if isinstance(sa_raw, str) else dict(sa_raw)
-        else:
-            # Option A: field-by-field
-            required = [
-                "project_id", "private_key_id", "private_key", "client_email",
-                "client_id", "auth_uri", "token_uri",
-                "auth_provider_x509_cert_url", "client_x509_cert_url",
-            ]
-            for k in required:
-                if k not in fb:
-                    raise RuntimeError(f"[firebase] Missing field in secrets: {k}")
-            sa = {
-                "type": fb.get("type", "service_account"),
-                "project_id": fb["project_id"],
-                "private_key_id": fb["private_key_id"],
-                "private_key": str(fb["private_key"]).replace("\\n", "\n"),
-                "client_email": fb["client_email"],
-                "client_id": fb["client_id"],
-                "auth_uri": fb["auth_uri"],
-                "token_uri": fb["token_uri"],
-                "auth_provider_x509_cert_url": fb["auth_provider_x509_cert_url"],
-                "client_x509_cert_url": fb["client_x509_cert_url"],
-            }
-        bucket_name = str(fb.get("storage_bucket", "")).strip()
+        # 2. Try Streamlit Secrets
+        if "firebase" in st.secrets:
+            fb = st.secrets["firebase"]
+            # Support both raw JSON string or field-by-field
+            if "service_account_json" in fb:
+                sa = json.loads(fb["service_account_json"])
+            elif "project_id" in fb:
+                sa = dict(fb)
+                # Fix newline characters often broken in TOML
+                if "private_key" in sa:
+                    sa["private_key"] = sa["private_key"].replace("\\n", "\n")
+            
+            bucket_name = fb.get("storage_bucket", "")
 
-    # (Optional) Env fallbacks if you use them locally/CI
-    if sa is None:
-        import os
-        sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
-        sa_path = os.getenv("FIREBASE_CREDENTIALS", "").strip()
-        if sa_json:
-            sa = json.loads(sa_json)
-        elif sa_path and Path(sa_path).exists():
-            sa = json.loads(Path(sa_path).read_text(encoding="utf-8"))
-        else:
-            raise RuntimeError(
-                "Missing Firebase credentials. Add them under [firebase] in Streamlit Secrets."
-            )
-        bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET", bucket_name) or ""
+        # 3. Fallback to Environment Variables
+        if sa is None:
+            sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+            if sa_json:
+                sa = json.loads(sa_json)
+        
+        if sa is None:
+            raise RuntimeError("No Firebase credentials found in st.secrets or Environment Variables.")
 
-    from firebase_admin import credentials as _credentials  # type: ignore
-    from firebase_admin import firestore as _firestore      # type: ignore
-    from firebase_admin import storage as _storage          # type: ignore
+        cred = credentials.Certificate(sa)
+        firebase_admin.initialize_app(cred, {
+            'storageBucket': bucket_name if bucket_name else None
+        })
 
-    cred = _credentials.Certificate(sa)
-    project_id = sa.get("project_id", "")
-
-    if not firebase_admin._apps:  # type: ignore
-        opts: Dict[str, str] = {}
-        if bucket_name:
-            opts["storageBucket"] = bucket_name
-        if project_id:
-            opts["projectId"] = project_id
-        firebase_admin.initialize_app(cred, opts)  # type: ignore
-
-    db = _firestore.client(project=project_id) if project_id else _firestore.client()  # type: ignore
-    bucket = _storage.bucket() if bucket_name else None  # type: ignore
+    db = firestore.client()
+    bucket = storage.bucket() if firebase_admin.get_app().options.get('storageBucket') else None
     return db, bucket
 
+def get_db():
+    db, _ = _init_firebase()
+    return db
 
-def get_db_and_bucket():
-    """Public accessor for Firestore client and Storage bucket."""
-    return _init_firebase()
+# ---------- Analytical Utilities (The "New System" Logic) ----------
 
-
-# ---------- Firestore <-> pandas utilities ----------
-
-def df_from_collection(collection: str, where: Optional[List[tuple]] = None) -> pd.DataFrame:
+def get_prioritized_subjects_df(user_id: str) -> pd.DataFrame:
     """
-    Load a whole collection (optionally with simple where filters).
-    where = [("field", "==", value), ...]
+    Fetches subjects and calculates Priority Score using Pandas for analysis.
     """
-    db, _ = get_db_and_bucket()
-    q = db.collection(collection)
-    if where:
-        for f, op, val in where:
-            q = q.where(f, op, val)
-    docs = q.stream()
+    db = get_db()
+    docs = db.collection(f"users/{user_id}/subjects").stream()
+    
     rows = []
+    now = datetime.now()
+
     for d in docs:
-        r = d.to_dict() or {}
-        r["id"] = r.get("id", d.id)
-        rows.append(r)
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
-
-
-def upsert_dataframe(collection: str, df: pd.DataFrame, id_field: str = "id") -> None:
-    """
-    Upsert each row in df into Firestore collection by id_field.
-    None/NaN are written as nulls. If id is missing/blank, a new doc is added.
-    """
-    db, _ = get_db_and_bucket()
-    for _, row in df.iterrows():
-        data = {k: (None if (isinstance(v, float) and pd.isna(v)) else v) for k, v in row.to_dict().items()}
-        doc_id = str(data.get(id_field) or "").strip()
-        if not doc_id:
-            db.collection(collection).add(data)
-        else:
-            db.collection(collection).document(doc_id).set(data, merge=True)
-
-
-def delete_by_ids(collection: str, ids: List[str]) -> None:
-    db, _ = get_db_and_bucket()
-    for doc_id in ids:
+        data = d.to_dict()
+        data["id"] = d.id
+        
+        # Parse Dates
         try:
-            db.collection(collection).document(str(doc_id)).delete()
-        except Exception:
-            pass
+            # Handle ISO string from your previous Node.js project
+            exam_dt = datetime.fromisoformat(data['examDate'].replace('Z', '+00:00'))
+            days_left = (exam_dt.date() - now.date()).days
+        except (KeyError, ValueError):
+            days_left = 30 # Fallback
 
+        # Analytical Formula
+        conf = data.get('confidence', 5)
+        credits = data.get('credits', 1)
+        
+        confidence_factor = 11 - conf
+        urgency_factor = 100 if days_left <= 0 else (30 / max(days_left, 1))
+        
+        data["priority_score"] = round(confidence_factor * credits * urgency_factor, 1)
+        data["days_left"] = days_left
+        rows.append(data)
 
-# ---------- app settings helpers ----------
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        return df.sort_values(by="priority_score", ascending=False)
+    return df
 
-SETTINGS_DOC = ("app_settings", "default")
-
-def load_settings_dict(defaults: dict) -> dict:
-    db, _ = get_db_and_bucket()
-    ref = db.collection(SETTINGS_DOC[0]).document(SETTINGS_DOC[1])
-    snap = ref.get()
-    data = snap.to_dict() if snap.exists else {}
-    out = defaults.copy()
-    out.update(data or {})
-    return out
-
-
-def save_settings_dict(s: dict) -> None:
-    db, _ = get_db_and_bucket()
-    ref = db.collection(SETTINGS_DOC[0]).document(SETTINGS_DOC[1])
-    ref.set(dict(s), merge=True)
-
-
-# ---------- Firebase Storage helpers ----------
-
-def upload_bytes(path_in_bucket: str, file_bytes: bytes, content_type: str | None = None) -> str:
+def log_progress(user_id: str, subject_id: str, hours: float):
     """
-    Uploads bytes to Firebase Storage (if bucket configured).
-    Returns a public URL if the blob is made public; otherwise the gs:// URL.
+    Python equivalent of your logStudySession Node.js action.
     """
-    _, bucket = get_db_and_bucket()
-    if bucket is None:
-        raise RuntimeError("Firebase Storage bucket not configured. Set storage_bucket in [firebase] secrets.")
-
-    blob = bucket.blob(path_in_bucket)
-    blob.upload_from_string(file_bytes, content_type=content_type)
-
-    # Try to make it public so the URL can render in the UI without signed URLs
-    try:
-        blob.make_public()
-        return blob.public_url
-    except Exception:
-        return f"gs://{bucket.name}/{path_in_bucket}"
-
-
-def delete_blob(path_in_bucket: str) -> None:
-    """Deletes a blob from Storage; no-op if it doesn't exist or bucket missing."""
-    _, bucket = get_db_and_bucket()
-    if bucket is None:
-        return
-    try:
-        bucket.blob(path_in_bucket).delete()
-    except Exception:
-        pass
+    db = get_db()
+    ref = db.collection(f"users/{user_id}/subjects").document(subject_id)
+    
+    ref.update({
+        "totalStudyHours": firestore.Increment(hours),
+        "lastStudied": datetime.now().isoformat()
+    })
